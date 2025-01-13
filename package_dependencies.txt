@@ -2,3 +2,4 @@ tqdm
 flickrapi
 tomlkit
 requests>=2.31.0
+Pillow
