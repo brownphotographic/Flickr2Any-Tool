@@ -38,6 +38,7 @@ import flickrapi
 import xml.etree.ElementTree as ET
 from importlib import metadata
 from tomlkit.api import key
+from PIL import Image
 
 class MediaType(Enum):
     """Supported media types"""
@@ -516,7 +517,7 @@ class FlickrToImmich:
                 logging.info(f"  Comments: {comments}")
 
                 # Check if photo meets criteria and calculate score
-                if faves > 0 or comments > 0 or views >= 3:  # Added views criterion
+                if faves > 10 or comments > 1 or views >= 20:  # Added views criterion
                     interestingness_score = (faves * 10) + (comments * 5) + (views * 0.1)  # Added views to score
                     logging.info(f"  Meets criteria! Score: {interestingness_score}")
                     logging.info(f"    Favorite points: {faves} × 10 = {faves * 10}")
@@ -1306,9 +1307,45 @@ class FlickrToImmich:
             *[f'-Keywords={tag["tag"]}' for tag in metadata.get('tags', [])],
         ]
 
-        # Use raw numeric value for orientation
-        if 'rotation' in metadata:
-            args.append(f'-IFD0:Orientation#={metadata["rotation"]}')
+        # Handle image orientation using PIL for verification
+        if media_file.suffix.lower() in ['.jpg', '.jpeg', '.tiff', '.tif']:
+            try:
+                with Image.open(media_file) as img:
+                    # Get existing EXIF data
+                    exif = img._getexif()
+                    if exif:
+                        # Find the orientation tag
+                        orientation_tag = None
+                        for tag_id in ExifTags.TAGS:
+                            if ExifTags.TAGS[tag_id] == 'Orientation':
+                                orientation_tag = tag_id
+                                break
+
+                        current_orientation = exif.get(orientation_tag, 1)
+                        logging.debug(f"Current image orientation: {current_orientation}")
+
+                        # If we have rotation metadata from Flickr
+                        if 'rotation' in metadata:
+                            rotation_degrees = int(metadata["rotation"])
+                            # Map Flickr's rotation degrees to EXIF orientation
+                            # Note: Flickr uses CCW rotation, EXIF uses CW
+                            rotation_map = {
+                                0: 1,    # Normal
+                                90: 8,   # Rotate 270 CW (90 CCW)
+                                180: 3,  # Rotate 180
+                                270: 6   # Rotate 90 CW (270 CCW)
+                            }
+                            new_orientation = rotation_map.get(rotation_degrees, 1)
+
+                            # Set orientation in EXIF
+                            args.extend([
+                                f'-IFD0:Orientation#={new_orientation}',
+                                '-IFD0:YCbCrPositioning=1',  # Ensure proper color space positioning
+                                '-IFD0:YCbCrSubSampling=2 2'  # Standard chroma subsampling
+                            ])
+                            logging.debug(f"Setting new orientation: {new_orientation} for rotation {rotation_degrees}")
+            except Exception as e:
+                logging.warning(f"Error checking image orientation: {str(e)}")
 
         # Standard GPS data if available
         if metadata.get('geo'):
