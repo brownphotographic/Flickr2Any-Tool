@@ -1,5 +1,7 @@
 """
 **** FLICKR TO IMMICH MIGRATION TOOL BY ROB BROWN ****
+https://github.com/brownphotographic/Flickr-Emmigration-Tool
+
 Copyright (C) 2025 Robert Brown
 
 This program is free software: you can redistribute it and/or modify
