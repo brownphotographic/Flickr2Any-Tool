@@ -127,6 +127,9 @@ Zero.
                         --organization by_date --date-format yyyy-mm
 
         - For creating 'My Highlights' folders automatically. This is sort of like flickr interestingness, but uses your own algorithm because Flickr's interestingness score is a black box
+     
+            This is useful if you want to show the most interesting photos from your library. For example maybe you only want to export those? Maybe you want to just load these to a sharing tool like PixelFed and load all the images to Immich? Your call!
+
             To change the scoring, scroll down to interestingness_score and make your algorithim reflect what you think is important!
             (Note I called it interestingness_score becaused I originally set out to use flickr's interestigness method. I ran into issues, so instead made this approach
             If you want me to implement the actual interestigness score from flickr, please add a feature request.)
@@ -152,10 +155,10 @@ Zero.
             For a interesting photo folders for images captured by year set the --interesting-period flag to 'byyear'
             To set the number of images in the interestingness albums, set the --interesting-count flag e.g. 100
 
-            - For exporting XMP Sidecars and embedding flickr metadata into the photo's EXIF description field:
-                - Use defaults (both enabled)- no flags to add
-                - Disable extended description add --no-extended-description
-                - Disable XMP sidecars add --no-xmp-sidecars
+        - For exporting XMP Sidecars and embedding flickr metadata into the photo's EXIF description field:
+            - Use defaults (both enabled)- no flags to add
+            - Disable extended description add --no-extended-description
+            - Disable XMP sidecars add --no-xmp-sidecars
 
 7. Import to Immich via CLI tool
     - Must use Immich CLI in order to maintain the albums (as folders) and XMP sidecar files containing additional metadata not supported in the standard EXIF metadata that is supported in the image file itself.
