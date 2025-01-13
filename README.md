@@ -23,9 +23,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 Zero. 
 - Download the files. Go to Green <> Code button and download the zip file to your computer
-- You may also download the sample images from this repo to use when testing the script https://github.com/brownphotographic/Flickr-Export-Sample/
 
-1. Request an export of your Flickr data - go to https://www.flickr.com/account then under "Your Flickr Data" request it. After a week or so flickr will email you with a link to the data.
+1. Request an export of your Flickr data - go to https://www.flickr.com/account then under "Your Flickr Data" request it. After a week or so flickr will email you with a link to the data. BEFORE you run the script on your massive library you may want to create a test flickr account, add a few images to that, favorite them, add to albums, comment etc. Then download that. With a small account it can take just a few hours to request your flickr archive. With a large account it can take over a week!
 2. Download the zip files. Depending on how large your account is you may have hundreds of zip files! Note there is one file for account data, and one for photos and videos. Download them all!
 3. On your computer where you will be running the script, create three folders: metadata, photos, output
 4. File and Folder Structure Setup:
