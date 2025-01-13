@@ -1,4 +1,5 @@
 **FLICKR EMMIGRATION TOOL BY ROB BROWN**
+
 Takes a Flickr library and reformats it to various options to allow importing to other tools like Immich, PhotoPrism, Pixelfed, your own computer etc etc
 It was written primarly to export to a folder format suitable for Immich and PixelFed
 ... but it gives generic outputs and lots of options and therefore is quite agnostic to the tool that is being used next. Yay for standards!
