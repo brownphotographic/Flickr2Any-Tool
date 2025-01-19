@@ -40,6 +40,10 @@ import xml.etree.ElementTree as ET
 from importlib import metadata
 from tomlkit.api import key
 from PIL import Image
+import os
+from PIL import Image
+import concurrent.futures
+import io
 
 class MediaType(Enum):
     """Supported media types"""
@@ -50,6 +54,113 @@ class MediaType(Enum):
 # Configuration flags
 INCLUDE_EXTENDED_DESCRIPTION = True  # Set to False to only include original description
 WRITE_XMP_SIDECARS = True  # Set to False to skip writing XMP sidecar files
+
+class JPEGVerifier:
+    """Utility class to verify JPEG integrity"""
+
+    @staticmethod
+    def attempt_repair(file_path: str) -> bool:
+        """
+        Attempt to repair a corrupted JPEG file using PIL
+        Returns: bool indicating success
+        """
+        try:
+            # Create a backup of the original file
+            backup_path = file_path + '.bak'
+            shutil.copy2(file_path, backup_path)
+
+            # Try to open and resave the image with PIL
+            success = False
+            try:
+                with Image.open(file_path) as img:
+                    # Create a temporary buffer
+                    temp_buffer = io.BytesIO()
+                    # Save with maximum quality to preserve image data
+                    img.save(temp_buffer, format='JPEG', quality=100,
+                            optimize=False, progressive=False)
+
+                    # If we got here, the save worked. Now write back to file
+                    with open(file_path, 'wb') as f:
+                        f.write(temp_buffer.getvalue())
+
+                    # Verify the repaired file
+                    is_valid, _ = JPEGVerifier.is_jpeg_valid(file_path)
+                    if is_valid:
+                        success = True
+                        os.remove(backup_path)  # Remove backup if repair succeeded
+                        return True
+
+            except Exception as e:
+                logging.warning(f"First repair attempt failed: {str(e)}")
+
+            # If first attempt failed, try alternative repair method
+            if not success:
+                try:
+                    # Restore from backup for second attempt
+                    shutil.copy2(backup_path, file_path)
+
+                    # Try using exiftool to repair
+                    repair_args = [
+                        'exiftool',
+                        '-all=',  # Remove all metadata
+                        '-overwrite_original',
+                        str(file_path)
+                    ]
+                    result = subprocess.run(repair_args, capture_output=True, text=True)
+
+                    if result.returncode == 0:
+                        # Verify the repaired file
+                        is_valid, _ = JPEGVerifier.is_jpeg_valid(file_path)
+                        if is_valid:
+                            success = True
+                            os.remove(backup_path)  # Remove backup if repair succeeded
+                            return True
+
+                except Exception as e:
+                    logging.warning(f"Second repair attempt failed: {str(e)}")
+
+            # If we get here, both repair attempts failed
+            # Restore from backup and return False
+            if os.path.exists(backup_path):
+                shutil.copy2(backup_path, file_path)
+                os.remove(backup_path)
+            return False
+
+        except Exception as e:
+            logging.error(f"Error in repair process: {str(e)}")
+            # Try to restore from backup if it exists
+            if os.path.exists(backup_path):
+                try:
+                    shutil.copy2(backup_path, file_path)
+                    os.remove(backup_path)
+                except:
+                    pass
+            return False
+
+    @staticmethod
+    def is_jpeg_valid(file_path: str) -> bool:
+        """Verify if a JPEG file is valid by checking for proper markers"""
+        try:
+            with open(file_path, 'rb') as f:
+                # Check SOI marker (Start of Image)
+                if f.read(2) != b'\xFF\xD8':
+                    return False, "Missing JPEG SOI marker"
+
+                # Read file in chunks to find EOI marker
+                chunk_size = 1024
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        return False, "Missing JPEG EOI marker"
+                    if b'\xFF\xD9' in chunk:  # Found EOI marker
+                        return True, ""
+
+                    # If we're at the end of file without finding EOI
+                    if len(chunk) < chunk_size:
+                        return False, "Missing JPEG EOI marker"
+
+        except Exception as e:
+            return False, f"Error reading JPEG: {str(e)}"
 
 class FlickrToImmich:
     # Supported file extensions
@@ -981,24 +1092,60 @@ class FlickrToImmich:
         """Process all photos: copy to albums and embed metadata"""
         self.stats['total_files'] = len(self.photo_to_albums)
 
-        # Create progress bar
-        with tqdm(total=self.stats['total_files'], desc="Processing photos", leave=True) as pbar:
-            for photo_id, albums in self.photo_to_albums.items():
-                try:
-                    if organization == 'by_album':
-                        success = self._process_single_photo_by_album(photo_id, albums)
-                    else:  # by_date
-                        success = self._process_single_photo_by_date(photo_id, date_format)
+        # Create a thread pool for parallel processing
+        max_workers = min(os.cpu_count() * 2, 8)  # Use up to 8 threads
 
-                    if success:
-                        self.stats['successful']['count'] += 1
-                    pbar.update(1)
-                except Exception as e:
-                    self.stats['failed']['count'] += 1
-                    self.stats['failed']['details'].append(
-                        (f"unknown_{photo_id}", f"photo_{photo_id}.json", str(e))
-                    )
-                    logging.error(f"Error processing {photo_id}: {str(e)}")
+        def process_photo_wrapper(args):
+            """Wrapper function for thread pool"""
+            photo_id, albums = args
+            try:
+                if organization == 'by_album':
+                    return self._process_single_photo_by_album(photo_id, albums)
+                else:
+                    return self._process_single_photo_by_date(photo_id, date_format)
+            except Exception as e:
+                return (False, photo_id, str(e))
+
+        # Process photos in parallel
+        items = list(self.photo_to_albums.items())
+        with tqdm(total=len(items),
+                desc="Processing photos",
+                leave=True,
+                bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]') as pbar:
+            pbar.set_postfix_str("Starting...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_photo = {
+                    executor.submit(process_photo_wrapper, item): item[0]
+                    for item in items
+                }
+
+                for future in concurrent.futures.as_completed(future_to_photo):
+                    photo_id = future_to_photo[future]
+                    try:
+                        result = future.result()
+                        if isinstance(result, tuple):
+                            # Error case
+                            success, photo_id, error = result
+                            self.stats['failed']['count'] += 1
+                            self.stats['failed']['details'].append(
+                                (f"unknown_{photo_id}", f"photo_{photo_id}.json", error)
+                            )
+                        else:
+                            # Success case
+                            if result:
+                                self.stats['successful']['count'] += 1
+                    except Exception as e:
+                        self.stats['failed']['count'] += 1
+                        self.stats['failed']['details'].append(
+                            (f"unknown_{photo_id}", f"photo_{photo_id}.json", str(e))
+                        )
+                    finally:
+                        # Update progress bar with current filename
+                        current_file = f"unknown_{photo_id}"
+                        if 'source_file' in locals():
+                            current_file = os.path.basename(str(source_file))
+                        pbar.set_postfix_str(f"File: {current_file}")
+                        pbar.update(1)
 
 
     def _build_formatted_description(self, metadata: Dict) -> str:
@@ -1095,7 +1242,7 @@ class FlickrToImmich:
             if not photo_json:
                 self.stats['skipped']['count'] += 1
                 self.stats['skipped']['details'].append(
-                    (f"unknown_{photo_id}", f"photo_{photo_id}.json", "Metadata file not found")
+                    (f"photo_{photo_id}", f"photo_{photo_id}.json", "Metadata file not found")
                 )
                 return False
 
@@ -1118,62 +1265,64 @@ class FlickrToImmich:
             if media_type == MediaType.UNKNOWN:
                 logging.warning(f"Unsupported media type for {source_file}")
                 self.stats['skipped']['count'] += 1
+                self.stats['skipped']['details'].append(
+                    (str(source_file), f"photo_{photo_id}.json", "Unsupported media type")
+                )
                 return False
 
-            # Track if we need to process any albums
-            needs_processing = False
-
-            # Check each album
-            for album_name in album_names:
-                album_dir = self.output_dir / "full_library_export" / "by_album" / self._sanitize_folder_name(album_name)
-                dest_file = album_dir / original_name
-
-                # Skip if file exists and we're resuming
-                if self.resume and dest_file.exists():
-                    logging.debug(f"Skipping existing file: {dest_file}")
-                    continue
-
-                needs_processing = True
-                break
-
-            # If resuming and file exists in all albums, skip processing
-            if self.resume and not needs_processing:
-                logging.debug(f"Skipping {photo_id} - exists in all albums")
-                self.stats['skipped']['count'] += 1
-                return True
-
             # Process the photo for each album
+            success = True
             for album_name in album_names:
-                album_dir = self.output_dir / "full_library_export" / "by_album" / self._sanitize_folder_name(album_name)
-                album_dir.mkdir(parents=True, exist_ok=True)
-                dest_file = album_dir / original_name
+                try:
+                    album_dir = self.output_dir / "full_library_export" / "by_album" / self._sanitize_folder_name(album_name)
+                    album_dir.mkdir(parents=True, exist_ok=True)
+                    dest_file = album_dir / original_name
 
-                # Skip if file exists and we're resuming
-                if self.resume and dest_file.exists():
-                    continue
+                    # Skip if file exists and we're resuming
+                    if self.resume and dest_file.exists():
+                        continue
 
-                logging.debug(f"Copying {source_file} to {dest_file}")
-                shutil.copy2(source_file, dest_file)
+                    # Copy file
+                    shutil.copy2(source_file, dest_file)
 
-                # Embed metadata based on media type
-                if media_type == MediaType.IMAGE:
-                    self._embed_image_metadata(dest_file, photo_json)
-                    if self.write_xmp_sidecars:
-                        self._write_xmp_sidecar(dest_file, photo_json)
-                elif media_type == MediaType.VIDEO:
-                    self._embed_video_metadata(dest_file, photo_json)
-                    if self.write_xmp_sidecars:
-                        self._write_xmp_sidecar(dest_file, photo_json)
+                    # For JPEG files, verify integrity before processing
+                    if media_type == MediaType.IMAGE and dest_file.suffix.lower() in ['.jpg', '.jpeg']:
+                        is_valid, error_msg = JPEGVerifier.is_jpeg_valid(str(dest_file))
+                        if not is_valid:
+                            if not JPEGVerifier.attempt_repair(str(dest_file)):
+                                logging.error(f"Unable to repair corrupted JPEG: {dest_file}")
+                                success = False
+                                continue
 
-            # Update success counter
-            self.stats['successful']['count'] += 1
-            return True
+                    # Embed metadata based on media type
+                    if media_type == MediaType.IMAGE:
+                        success = self._embed_image_metadata(dest_file, photo_json)
+                        if success and self.write_xmp_sidecars:
+                            self._write_xmp_sidecar(dest_file, photo_json)
+                    elif media_type == MediaType.VIDEO:
+                        success = self._embed_video_metadata(dest_file, photo_json)
+                        if success and self.write_xmp_sidecars:
+                            self._write_xmp_sidecar(dest_file, photo_json)
+
+                except Exception as e:
+                    logging.error(f"Error processing {photo_id} in album {album_name}: {str(e)}")
+                    success = False
+
+            if success:
+                self.stats['successful']['count'] += 1
+            else:
+                self.stats['failed']['count'] += 1
+                self.stats['failed']['details'].append(
+                    (str(source_file), f"photo_{photo_id}.json", "Failed to process in one or more albums")
+                )
+
+            return success
 
         except Exception as e:
             error_msg = f"Error processing {photo_id}: {str(e)}"
             self.stats['failed']['count'] += 1
             self.stats['failed']['details'].append(
-                (str(source_file) if 'source_file' in locals() else f"unknown_{photo_id}",
+                (str(source_file) if 'source_file' in locals() else f"photo_{photo_id}",
                 f"photo_{photo_id}.json",
                 error_msg)
             )
@@ -1188,7 +1337,7 @@ class FlickrToImmich:
             if not photo_json:
                 self.stats['skipped']['count'] += 1
                 self.stats['skipped']['details'].append(
-                    (f"unknown_{photo_id}", f"photo_{photo_id}.json", "Metadata file not found")
+                    (f"photo_{photo_id}", f"photo_{photo_id}.json", "Metadata file not found")
                 )
                 return False
 
@@ -1231,32 +1380,64 @@ class FlickrToImmich:
             if media_type == MediaType.UNKNOWN:
                 logging.warning(f"Unsupported media type for {source_file}")
                 self.stats['skipped']['count'] += 1
+                self.stats['skipped']['details'].append(
+                    (str(source_file), f"photo_{photo_id}.json", "Unsupported media type")
+                )
                 return False
 
-            # Create directory and copy file
-            date_dir.mkdir(parents=True, exist_ok=True)
-            logging.debug(f"Copying {source_file} to {dest_file}")
-            shutil.copy2(source_file, dest_file)
+            try:
+                # Create directory and copy file
+                date_dir.mkdir(parents=True, exist_ok=True)
+                logging.debug(f"Copying {source_file} to {dest_file}")
+                shutil.copy2(source_file, dest_file)
 
-            # Embed metadata based on media type
-            if media_type == MediaType.IMAGE:
-                self._embed_image_metadata(dest_file, photo_json)
-                if self.write_xmp_sidecars:
-                    self._write_xmp_sidecar(dest_file, photo_json)
-            elif media_type == MediaType.VIDEO:
-                self._embed_video_metadata(dest_file, photo_json)
-                if self.write_xmp_sidecars:
-                    self._write_xmp_sidecar(dest_file, photo_json)
+                # For JPEG files, verify integrity before processing
+                if media_type == MediaType.IMAGE and dest_file.suffix.lower() in ['.jpg', '.jpeg']:
+                    is_valid, error_msg = JPEGVerifier.is_jpeg_valid(str(dest_file))
+                    if not is_valid:
+                        if not JPEGVerifier.attempt_repair(str(dest_file)):
+                            logging.error(f"Unable to repair corrupted JPEG: {dest_file}")
+                            self.stats['failed']['count'] += 1
+                            self.stats['failed']['details'].append(
+                                (str(source_file), f"photo_{photo_id}.json", f"JPEG validation failed: {error_msg}")
+                            )
+                            return False
 
-            # Update success counter
-            self.stats['successful']['count'] += 1
-            return True
+                # Embed metadata based on media type
+                success = False
+                if media_type == MediaType.IMAGE:
+                    success = self._embed_image_metadata(dest_file, photo_json)
+                    if success and self.write_xmp_sidecars:
+                        self._write_xmp_sidecar(dest_file, photo_json)
+                elif media_type == MediaType.VIDEO:
+                    success = self._embed_video_metadata(dest_file, photo_json)
+                    if success and self.write_xmp_sidecars:
+                        self._write_xmp_sidecar(dest_file, photo_json)
+
+                if success:
+                    self.stats['successful']['count'] += 1
+                    return True
+                else:
+                    self.stats['failed']['count'] += 1
+                    self.stats['failed']['details'].append(
+                        (str(source_file), f"photo_{photo_id}.json", "Failed to embed metadata")
+                    )
+                    return False
+
+            except Exception as e:
+                error_msg = f"Error processing file {dest_file}: {str(e)}"
+                self.stats['failed']['count'] += 1
+                self.stats['failed']['details'].append(
+                    (str(source_file), f"photo_{photo_id}.json", error_msg)
+                )
+                logging.error(error_msg)
+                return False
 
         except Exception as e:
             error_msg = f"Error processing {photo_id}: {str(e)}"
             self.stats['failed']['count'] += 1
             self.stats['failed']['details'].append(
-                (str(source_file) if 'source_file' in locals() else f"unknown_{photo_id}",
+                (str(source_file) if 'source_file' in locals() else f"photo_{photo_id}",
                 f"photo_{photo_id}.json",
                 error_msg)
             )
@@ -1266,121 +1447,143 @@ class FlickrToImmich:
     def _embed_image_metadata(self, photo_file: Path, metadata: Dict):
         """Embed metadata into an image file using exiftool with enhanced error handling"""
         try:
-            # Start with basic, safe metadata arguments
-            args = [
-                'exiftool',
-                '-overwrite_original',
-                '-ignoreMinorErrors',
-                '-m',
-                '-P',  # Preserve existing metadata
-                '-E',  # Extract embedded metadata
+            # First, check if the file exists and is accessible
+            if not photo_file.exists():
+                raise FileNotFoundError(f"Source file does not exist: {photo_file}")
 
-                # Core metadata that's less likely to cause issues
-                f'-Description={metadata.get("description", "")}',
-                f'-Title={metadata.get("name", "")}',
-                f'-Author={self.account_data.get("real_name", "")}',
-                f'-Copyright={metadata.get("license", "All Rights Reserved")}',
-
-                # Handle date separately to avoid format issues
-                f'-DateTimeOriginal={metadata.get("date_taken", "")}',
-            ]
-
-            # Add keywords/tags safely
-            for tag in metadata.get('tags', []):
-                if isinstance(tag, dict) and 'tag' in tag:
-                    args.append(f'-Keywords={tag["tag"]}')
-
-            # Handle GPS data carefully
-            if metadata.get('geo'):
-                geo = metadata['geo']
-                if all(key in geo and isinstance(geo[key], (int, float))
-                    for key in ['latitude', 'longitude']):
-                    args.extend([
-                        f'-GPSLatitude={geo["latitude"]}',
-                        f'-GPSLongitude={geo["longitude"]}',
-                    ])
-
-            # Add the enhanced description using a more reliable field
-            enhanced_description = self._build_formatted_description(metadata)
-            args.extend([
-                f'-ImageDescription={enhanced_description}',
-                f'-IPTC:Caption-Abstract={enhanced_description}'
-            ])
-
-            # Add the target file at the end
-            args.append(str(photo_file))
-
-            # First, try to read existing metadata
-            check_args = ['exiftool', '-j', str(photo_file)]
-            try:
-                result = subprocess.run(check_args, capture_output=True, text=True)
-                if result.returncode == 0:
-                    logging.debug(f"Successfully read existing metadata from {photo_file}")
-                else:
-                    logging.warning(f"Warning reading metadata from {photo_file}: {result.stderr}")
-            except Exception as e:
-                logging.warning(f"Error checking existing metadata: {str(e)}")
-
-            # Now try to write the new metadata
-            result = subprocess.run(args, capture_output=True, text=True)
-
-            if result.returncode != 0:
-                raise subprocess.CalledProcessError(result.returncode, args, result.stdout, result.stderr)
-
-            if result.stderr:
-                # Log warnings but don't fail unless it's a critical error
-                if "Bad format" in result.stderr or "Suspicious IFD0" in result.stderr:
-                    logging.warning(f"Non-critical EXIF warning for {photo_file}: {result.stderr}")
-                else:
-                    logging.debug(f"Exiftool message for {photo_file}: {result.stderr}")
-
-        except subprocess.CalledProcessError as e:
-            if "Bad format" in str(e.stderr) or "Suspicious IFD0" in str(e.stderr):
-                # For known EXIF issues, try a more conservative approach
+            # Clean up any leftover temporary files before starting
+            temp_file = Path(str(photo_file) + "_exiftool_tmp")
+            if temp_file.exists():
                 try:
-                    conservative_args = [
-                        'exiftool',
-                        '-overwrite_original',
-                        '-ignoreMinorErrors',
-                        '-m',
-                        f'-ImageDescription={enhanced_description}',
-                        f'-IPTC:Caption-Abstract={enhanced_description}',
-                        str(photo_file)
-                    ]
-                    result = subprocess.run(conservative_args, capture_output=True, text=True)
-                    if result.returncode == 0:
-                        logging.info(f"Successfully embedded basic metadata in {photo_file} using conservative approach")
-                        return
-                except Exception as inner_e:
-                    logging.error(f"Error in conservative metadata embedding for {photo_file}: {str(inner_e)}")
-                    raise
+                    temp_file.unlink()
+                    logging.info(f"Cleaned up existing temporary file: {temp_file}")
+                except Exception as e:
+                    logging.warning(f"Could not remove existing temporary file {temp_file}: {e}")
+                    return False
 
-            error_msg = f"Error embedding metadata in {photo_file}: {e.stderr}"
-            logging.error(error_msg)
-            raise ValueError(error_msg)
+            # Build basic metadata arguments
+            args = self._build_exiftool_args(photo_file, metadata)
+            enhanced_description = self._build_formatted_description(metadata)
+
+            # First verify JPEG integrity if it's a JPEG file
+            if photo_file.suffix.lower() in ['.jpg', '.jpeg']:
+                is_valid, error_msg = JPEGVerifier.is_jpeg_valid(str(photo_file))
+                if not is_valid:
+                    logging.warning(f"JPEG validation failed for {photo_file}: {error_msg}")
+                    if JPEGVerifier.attempt_repair(str(photo_file)):
+                        logging.info(f"Successfully repaired {photo_file}")
+                    else:
+                        # Try with minimal metadata as a last resort
+                        try:
+                            minimal_args = [
+                                'exiftool',
+                                '-overwrite_original',
+                                '-ignoreMinorErrors',
+                                '-m',
+                                '-P',
+                                '-fast',
+                                '-safe',
+                                f'-IPTC:Caption-Abstract={enhanced_description}',
+                                str(photo_file)
+                            ]
+                            result = subprocess.run(minimal_args, capture_output=True, text=True)
+                            if result.returncode == 0:
+                                logging.info(f"Successfully embedded minimal metadata in {photo_file}")
+                                return True
+                        except Exception as inner_e:
+                            logging.error(f"Failed minimal metadata embed for {photo_file}: {str(inner_e)}")
+                            return False
+
+            max_retries = 3
+            retry_count = 0
+
+            while retry_count < max_retries:
+                try:
+                    # Clean up any temporary file before each attempt
+                    if temp_file.exists():
+                        temp_file.unlink()
+
+                    # Try to embed metadata
+                    result = subprocess.run(args, capture_output=True, text=True)
+
+                    if result.returncode == 0:
+                        return True
+
+                    if "Error renaming temporary file" in result.stderr:
+                        # Wait briefly and retry
+                        time.sleep(0.5)
+                        retry_count += 1
+                        continue
+
+                    if "Format error" in result.stderr or "Not a valid JPG" in result.stderr:
+                        # Try minimal embed
+                        minimal_args = [
+                            'exiftool',
+                            '-overwrite_original',
+                            '-ignoreMinorErrors',
+                            '-m',
+                            '-P',
+                            '-fast',
+                            '-safe',
+                            f'-IPTC:Caption-Abstract={enhanced_description}',
+                            str(photo_file)
+                        ]
+                        result = subprocess.run(minimal_args, capture_output=True, text=True)
+                        if result.returncode == 0:
+                            return True
+                        break
+
+                except Exception as e:
+                    logging.error(f"Attempt {retry_count + 1} failed: {str(e)}")
+                    retry_count += 1
+                    time.sleep(0.5)
+
+            if retry_count >= max_retries:
+                logging.error(f"Failed to embed metadata after {max_retries} attempts for {photo_file}")
+                return False
 
         except Exception as e:
-            error_msg = f"Unexpected error embedding metadata in {photo_file}: {str(e)}"
-            logging.error(error_msg)
-            raise ValueError(error_msg)
+            logging.error(f"Unexpected error embedding metadata in {photo_file}: {str(e)}")
+            return False
 
     def _load_photo_metadata(self, photo_id: str) -> Optional[Dict]:
-        """Load metadata for a specific photo"""
+        """Load metadata for a specific photo with enhanced file finding and logging"""
         try:
             # Try different possible metadata file patterns
             possible_patterns = [
                 f"photo_{photo_id}.json",
                 f"photo_{int(photo_id):d}.json",  # Handle numerical IDs
-                f"photo_{photo_id.lstrip('0')}.json"  # Handle IDs with leading zeros
+                f"photo_{photo_id.lstrip('0')}.json",  # Handle IDs with leading zeros
+                f"{photo_id}.json",  # Try without 'photo_' prefix
+                f"{int(photo_id):d}.json"  # Try without prefix and as integer
             ]
 
+            # Debug log the search patterns
+            logging.debug(f"Searching for metadata for photo {photo_id}")
+            logging.debug(f"Looking in directory: {self.metadata_dir}")
+            logging.debug(f"Trying patterns: {possible_patterns}")
+
+            # Try each pattern
             for pattern in possible_patterns:
                 photo_file = self.metadata_dir / pattern
                 if photo_file.exists():
+                    logging.debug(f"Found metadata file: {photo_file}")
                     with open(photo_file, 'r', encoding='utf-8') as f:
                         return json.load(f)
+                else:
+                    logging.debug(f"Pattern {pattern} not found")
 
-            logging.error(f"Metadata file not found for photo {photo_id}")
+            # If we get here, we couldn't find the file
+            # Do a directory listing to help debug
+            logging.debug("Listing all JSON files in metadata directory:")
+            json_files = list(self.metadata_dir.glob("*.json"))
+            logging.debug(f"Found {len(json_files)} JSON files")
+            if len(json_files) > 0:
+                logging.debug("Sample of JSON files found:")
+                for f in json_files[:5]:  # Show first 5 files
+                    logging.debug(f"  - {f.name}")
+
+            logging.error(f"Metadata file not found for photo {photo_id} after trying all patterns")
             return None
 
         except Exception as e:
@@ -1388,19 +1591,49 @@ class FlickrToImmich:
             return None
 
     def _find_photo_file(self, photo_id: str, filename: str) -> Optional[Path]:
-        """Find the original photo file using the Flickr ID"""
-        # Try exact match first
-        for file in self.photos_dir.iterdir():
-            if f"_{photo_id}_" in file.name:
-                return file
+        """Find the original photo file using the Flickr ID with enhanced logging"""
+        logging.debug(f"Searching for photo file {photo_id} (filename: {filename})")
+        logging.debug(f"Looking in directory: {self.photos_dir}")
 
-        # If not found, try normalized versions (handle old-style IDs)
+        # First try: exact match with photo ID
+        matches = []
+        for file in self.photos_dir.iterdir():
+            if f"_{photo_id}_" in file.name or f"_{photo_id}." in file.name:
+                matches.append(file)
+                logging.debug(f"Found exact match: {file.name}")
+
+        if matches:
+            if len(matches) > 1:
+                logging.warning(f"Multiple matches found for {photo_id}, using first one: {matches[0]}")
+            return matches[0]
+
+        # Second try: normalize ID and try again
         normalized_id = photo_id.lstrip('0')  # Remove leading zeros
+        logging.debug(f"Trying normalized ID: {normalized_id}")
+
         for file in self.photos_dir.iterdir():
             file_parts = file.name.split('_')
             for part in file_parts:
-                if part.lstrip('0') == normalized_id:
+                clean_part = part.split('.')[0]  # Remove extension if present
+                if clean_part.lstrip('0') == normalized_id:
+                    logging.debug(f"Found match with normalized ID: {file.name}")
                     return file
+
+        # Third try: look for filename
+        clean_filename = filename.lower()
+        for file in self.photos_dir.iterdir():
+            if file.name.lower().startswith(clean_filename):
+                logging.debug(f"Found match by filename: {file.name}")
+                return file
+
+        # If we get here, we couldn't find the file
+        logging.debug("Listing sample of files in photos directory:")
+        all_files = list(self.photos_dir.iterdir())
+        logging.debug(f"Total files in directory: {len(all_files)}")
+        if len(all_files) > 0:
+            logging.debug("Sample of files found:")
+            for f in all_files[:5]:  # Show first 5 files
+                logging.debug(f"  - {f.name}")
 
         logging.error(f"Could not find media file for {photo_id} ({filename})")
         return None
