@@ -91,7 +91,7 @@ At a high level the user flow is this:
     - for the account data zip extract the contents into 'metadata'
     - for the photo AND video files extract the contents into 'photos'
 
-4. *Set up your environment and run the script*:
+4. *Set up your environment - dependencies*:
 
     - System dependencies: you must have:
        Python >= 3.6 (for f-strings, Path objects)
@@ -221,7 +221,16 @@ At a high level the user flow is this:
             - Disable XMP sidecars add --no-xmp-sidecars
 
         - Resume: If you had to stop processing, you can resume the script to process files not already processed:
-            - add --resume flag
+            --resume
+
+        - Block files from exporting:  Block file export if metadata or file processing fails
+            Add this flag only if you want it block export if metadata or file processing fails. Leave it out and it will export the photo regardless of the failure.
+            --export-block-if-failure
+
+        - Logging verbosity:
+            Add this flag to make the console output just show status bar while running. The log files will show the errors:
+            --quiet
+
 
 6. *Import to your tool of choice*
 
