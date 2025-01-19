@@ -682,68 +682,76 @@ class FlickrToImmich:
             # Initialize privacy groups dynamically
             privacy_groups = {}
 
-            # Group photos by exact privacy setting
-            for photo in all_photos:
-                privacy = photo.get('privacy', '').lower()
-                if not privacy:
-                    privacy = 'private'  # Default to private if no setting
+            # Group photos by exact privacy setting with progress bar
+            with tqdm(all_photos, desc="Analyzing privacy settings", unit="photo") as pbar:
+                for photo in pbar:
+                    privacy = photo.get('privacy', '').lower()
+                    if not privacy:
+                        privacy = 'private'  # Default to private if no setting
 
-                if privacy not in privacy_groups:
-                    privacy_groups[privacy] = []
-                privacy_groups[privacy].append(photo)
-
-                # Log privacy settings for debugging
-                logging.debug(f"Photo {photo.get('id', 'unknown')}: privacy = {privacy}")
+                    if privacy not in privacy_groups:
+                        privacy_groups[privacy] = []
+                    privacy_groups[privacy].append(photo)
+                    pbar.set_postfix({'privacy': privacy})
 
             # Log summary of privacy groups found
             logging.info("\nPrivacy groups found:")
             for privacy, photos in privacy_groups.items():
                 logging.info(f"- {privacy}: {len(photos)} photos")
 
-            # Sort each group by interestingness score
-            for privacy, group in privacy_groups.items():
-                group.sort(key=lambda x: x['interestingness_score'], reverse=True)
-                # Add normalized scores within each privacy group
-                for i, photo in enumerate(group, 1):
-                    photo['normalized_score'] = i
+            # Process each privacy group with an overall progress bar
+            total_groups = len(privacy_groups)
+            with tqdm(total=total_groups, desc="Processing privacy groups", unit="group") as group_pbar:
+                for privacy, group in privacy_groups.items():
+                    group_pbar.set_postfix({'current': privacy})
 
-                # Create folder name based on privacy setting
-                folder_name = privacy.replace(' ', '_').title() + '_Highlights'
+                    # Sort by interestingness score
+                    group.sort(key=lambda x: x['interestingness_score'], reverse=True)
+                    for i, photo in enumerate(group, 1):
+                        photo['normalized_score'] = i
 
-                if time_period == 'all-time':
-                    self._create_single_interesting_album(
-                        highlights_dir / folder_name,
-                        f"All Time {folder_name}",
-                        f"Your most engaging {privacy} Flickr photos across all time",
-                        group
-                    )
-                else:  # byyear
-                    photos_by_year = {}
-                    for photo in group:
-                        year = photo['year_taken']
-                        if year not in photos_by_year:
-                            photos_by_year[year] = []
-                        photos_by_year[year].append(photo)
+                    # Create folder name based on privacy setting
+                    folder_name = privacy.replace(' ', '_').title() + '_Highlights'
 
-                    for year in sorted(photos_by_year.keys(), reverse=True):
-                        year_photos = photos_by_year[year]
-                        if len(year_photos) > photo_count:
-                            year_photos = year_photos[:photo_count]
-
-                        # Sort and rank within each year
-                        year_photos.sort(key=lambda x: x['interestingness_score'], reverse=True)
-                        for i, photo in enumerate(year_photos, 1):
-                            photo['normalized_score'] = i
-
+                    if time_period == 'all-time':
                         self._create_single_interesting_album(
                             highlights_dir / folder_name,
-                            f"{folder_name} {year}",
-                            f"Your most engaging {privacy} Flickr photos from {year}",
-                            year_photos
+                            f"All Time {folder_name}",
+                            f"Your most engaging {privacy} Flickr photos across all time",
+                            group
                         )
+                    else:  # byyear
+                        photos_by_year = {}
+                        for photo in group:
+                            year = photo['year_taken']
+                            if year not in photos_by_year:
+                                photos_by_year[year] = []
+                            photos_by_year[year].append(photo)
 
-            # Log the final folder structure created
-            logging.info("\nCreated highlight folders:")
+                        # Process each year with its own progress bar
+                        years = sorted(photos_by_year.keys(), reverse=True)
+                        with tqdm(years, desc=f"Processing years for {privacy}", unit="year", leave=False) as year_pbar:
+                            for year in year_pbar:
+                                year_pbar.set_postfix({'year': year})
+                                year_photos = photos_by_year[year]
+                                if len(year_photos) > photo_count:
+                                    year_photos = year_photos[:photo_count]
+
+                                # Sort and rank within each year
+                                year_photos.sort(key=lambda x: x['interestingness_score'], reverse=True)
+                                for i, photo in enumerate(year_photos, 1):
+                                    photo['normalized_score'] = i
+
+                                self._create_single_interesting_album(
+                                    highlights_dir / folder_name,
+                                    f"{folder_name} {year}",
+                                    f"Your most engaging {privacy} Flickr photos from {year}",
+                                    year_photos
+                                )
+
+                    group_pbar.update(1)
+
+            logging.info("\nFinished creating highlight folders:")
             for privacy in privacy_groups.keys():
                 folder_name = privacy.replace(' ', '_').title() + '_Highlights'
                 logging.info(f"- {folder_name}/")
@@ -752,10 +760,9 @@ class FlickrToImmich:
             logging.error(f"Error creating highlight albums: {str(e)}")
             raise
 
-    def _create_single_interesting_album(self, parent_dir: Path, album_name: str, description: str, photos: List[Dict]):
+    def _create_single_interesting_album(self, album_dir: Path, album_name: str, description: str, photos: List[Dict]):
         """Create a single album of engaging photos using existing photo files"""
         try:
-            album_dir = parent_dir / self._sanitize_folder_name(album_name)
             album_dir.mkdir(parents=True, exist_ok=True)
 
             album_metadata = {
@@ -767,7 +774,7 @@ class FlickrToImmich:
             }
             self._save_album_metadata(album_dir, album_metadata)
 
-            with tqdm(total=len(photos), desc=f"Processing {album_name}") as pbar:
+            with tqdm(total=len(photos), desc=f"Processing {album_name}", leave=False) as pbar:
                 for photo in photos:
                     try:
                         source_file = photo['original_file']
@@ -776,11 +783,12 @@ class FlickrToImmich:
                             self.stats['skipped']['details'].append(
                                 (str(source_file), f"photo_{photo['id']}.json", "Source file missing for highlight")
                             )
+                            pbar.update(1)
                             continue
 
                         # Create descriptive filename
                         safe_title = self._sanitize_folder_name(photo['title']) if photo['title'] else photo['id']
-                        photo_filename = f"{safe_title}_{photo['id']}{source_file.suffix}"
+                        photo_filename = f"{safe_title}_{photo['id']}{Path(source_file).suffix}"
                         dest_file = album_dir / photo_filename
 
                         # Copy file
@@ -792,16 +800,13 @@ class FlickrToImmich:
 
                         # Add engagement metrics to metadata
                         photo_for_metadata['engagement'] = {
-                            'rank': photo['normalized_score'],  # Now using rank instead of normalized score
-                            'total_ranked': len(photos),  # Include total number of ranked photos
+                            'rank': photo['normalized_score'],
+                            'total_ranked': len(photos),
                             'favorites': photo['fave_count'],
                             'comments': photo['comment_count']
                         }
 
-                        # Log the rank for debugging
-                        logging.debug(f"Photo {photo['id']} in {album_name}: rank={photo['normalized_score']} of {len(photos)}")
-
-                        # Ensure photopage exists (add a default if missing)
+                        # Ensure photopage exists
                         if 'photopage' not in photo_for_metadata:
                             photo_for_metadata['photopage'] = f"https://www.flickr.com/photos/{self.account_data.get('nsid', '')}/{photo['id']}"
 
@@ -827,15 +832,8 @@ class FlickrToImmich:
                             error_msg)
                         )
                         logging.error(error_msg)
+                        pbar.update(1)
                         continue
-
-            logging.info(f"Created highlights album: {album_name} with {len(photos)} photos")
-
-            # Log rank distribution for this album
-            ranks = [photo['normalized_score'] for photo in photos]
-            logging.info(f"Rank distribution in {album_name}:")
-            logging.info(f"  Top rank: {max(ranks)}")
-            logging.info(f"  Bottom rank: {min(ranks)}")
 
         except Exception as e:
             error_msg = f"Error creating album {album_name}: {str(e)}"
@@ -1002,6 +1000,7 @@ class FlickrToImmich:
                     )
                     logging.error(f"Error processing {photo_id}: {str(e)}")
 
+
     def _build_formatted_description(self, metadata: Dict) -> str:
         """Create a formatted description including key metadata fields based on configuration"""
         if not self.include_extended_description:
@@ -1094,7 +1093,7 @@ class FlickrToImmich:
             # Load photo metadata
             photo_json = self._load_photo_metadata(photo_id)
             if not photo_json:
-                self.stats['skipped']['count'] += 1  # Changed from self.stats['skipped'] += 1
+                self.stats['skipped']['count'] += 1
                 self.stats['skipped']['details'].append(
                     (f"unknown_{photo_id}", f"photo_{photo_id}.json", "Metadata file not found")
                 )
@@ -1103,7 +1102,7 @@ class FlickrToImmich:
             # Find the source file
             source_file = self._find_photo_file(photo_id, photo_json['name'])
             if not source_file:
-                self.stats['skipped']['count'] += 1  # Changed from self.stats['skipped'] += 1
+                self.stats['skipped']['count'] += 1
                 self.stats['skipped']['details'].append(
                     (photo_json['name'], f"photo_{photo_id}.json", "Source file not found")
                 )
@@ -1118,7 +1117,7 @@ class FlickrToImmich:
             media_type = self.get_media_type(source_file)
             if media_type == MediaType.UNKNOWN:
                 logging.warning(f"Unsupported media type for {source_file}")
-                self.stats['skipped']['count'] += 1  # Changed from self.stats['skipped'] += 1
+                self.stats['skipped']['count'] += 1
                 return False
 
             # Track if we need to process any albums
@@ -1140,7 +1139,7 @@ class FlickrToImmich:
             # If resuming and file exists in all albums, skip processing
             if self.resume and not needs_processing:
                 logging.debug(f"Skipping {photo_id} - exists in all albums")
-                self.stats['skipped']['count'] += 1  # Changed from self.stats['skipped'] += 1
+                self.stats['skipped']['count'] += 1
                 return True
 
             # Process the photo for each album
@@ -1156,8 +1155,15 @@ class FlickrToImmich:
                 logging.debug(f"Copying {source_file} to {dest_file}")
                 shutil.copy2(source_file, dest_file)
 
-                # Embed metadata
-                self._embed_metadata(dest_file, photo_json, media_type)
+                # Embed metadata based on media type
+                if media_type == MediaType.IMAGE:
+                    self._embed_image_metadata(dest_file, photo_json)
+                    if self.write_xmp_sidecars:
+                        self._write_xmp_sidecar(dest_file, photo_json)
+                elif media_type == MediaType.VIDEO:
+                    self._embed_video_metadata(dest_file, photo_json)
+                    if self.write_xmp_sidecars:
+                        self._write_xmp_sidecar(dest_file, photo_json)
 
             # Update success counter
             self.stats['successful']['count'] += 1
@@ -1165,7 +1171,7 @@ class FlickrToImmich:
 
         except Exception as e:
             error_msg = f"Error processing {photo_id}: {str(e)}"
-            self.stats['failed']['count'] += 1  # Changed from self.stats['failed'] += 1
+            self.stats['failed']['count'] += 1
             self.stats['failed']['details'].append(
                 (str(source_file) if 'source_file' in locals() else f"unknown_{photo_id}",
                 f"photo_{photo_id}.json",
@@ -1180,7 +1186,7 @@ class FlickrToImmich:
             # Load photo metadata
             photo_json = self._load_photo_metadata(photo_id)
             if not photo_json:
-                self.stats['skipped']['count'] += 1  # Changed from self.stats['skipped'] += 1
+                self.stats['skipped']['count'] += 1
                 self.stats['skipped']['details'].append(
                     (f"unknown_{photo_id}", f"photo_{photo_id}.json", "Metadata file not found")
                 )
@@ -1218,13 +1224,13 @@ class FlickrToImmich:
             # Skip if file exists and we're resuming
             if self.resume and dest_file.exists():
                 logging.debug(f"Skipping existing file: {dest_file}")
-                self.stats['skipped']['count'] += 1  # Changed from self.stats['skipped'] += 1
+                self.stats['skipped']['count'] += 1
                 return True
 
             media_type = self.get_media_type(source_file)
             if media_type == MediaType.UNKNOWN:
                 logging.warning(f"Unsupported media type for {source_file}")
-                self.stats['skipped']['count'] += 1  # Changed from self.stats['skipped'] += 1
+                self.stats['skipped']['count'] += 1
                 return False
 
             # Create directory and copy file
@@ -1232,8 +1238,15 @@ class FlickrToImmich:
             logging.debug(f"Copying {source_file} to {dest_file}")
             shutil.copy2(source_file, dest_file)
 
-            # Embed metadata
-            self._embed_metadata(dest_file, photo_json, media_type)
+            # Embed metadata based on media type
+            if media_type == MediaType.IMAGE:
+                self._embed_image_metadata(dest_file, photo_json)
+                if self.write_xmp_sidecars:
+                    self._write_xmp_sidecar(dest_file, photo_json)
+            elif media_type == MediaType.VIDEO:
+                self._embed_video_metadata(dest_file, photo_json)
+                if self.write_xmp_sidecars:
+                    self._write_xmp_sidecar(dest_file, photo_json)
 
             # Update success counter
             self.stats['successful']['count'] += 1
@@ -1241,7 +1254,7 @@ class FlickrToImmich:
 
         except Exception as e:
             error_msg = f"Error processing {photo_id}: {str(e)}"
-            self.stats['failed']['count'] += 1  # Changed from self.stats['failed'] += 1
+            self.stats['failed']['count'] += 1
             self.stats['failed']['details'].append(
                 (str(source_file) if 'source_file' in locals() else f"unknown_{photo_id}",
                 f"photo_{photo_id}.json",
