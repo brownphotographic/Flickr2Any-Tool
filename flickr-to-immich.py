@@ -268,7 +268,7 @@ class FlickrToImmich:
                 f.write(f"Total files processed: {self.stats['total_files']}\n")
                 f.write(f"Successfully processed: {self.stats['successful']['count']}\n")
                 f.write(f"Failed to process: {self.stats['failed']['count']}\n")
-                f.write(f"Not processed/skipped: {self.stats['skipped']['count']}\n\n")
+                f.write(f"Skipped due to resume function: {self.stats['skipped']['count']}\n\n")
 
                 # Write failed files section
                 f.write("FAILED FILES\n------------\n")
@@ -282,7 +282,7 @@ class FlickrToImmich:
                         f.write("-" * 50 + "\n")
 
                 # Write skipped/not processed files section
-                f.write("\nSKIPPED/NOT PROCESSED FILES\n-------------------------\n")
+                f.write("\nSKIPPED due to resume\n-------------------------\n")
                 if self.stats['skipped']['count'] == 0:
                     f.write("No skipped files\n")
                 else:
@@ -656,7 +656,7 @@ class FlickrToImmich:
             return []
 
     def create_interesting_albums(self, time_period: str, photo_count: int = 100):
-        """Create albums of user's most engaging photos, organized by privacy setting."""
+        """Create albums of user's most engaging photos, organized by detailed privacy settings."""
         try:
             # Create highlights_only parent directory
             highlights_dir = self.output_dir / "highlights_only"
@@ -679,54 +679,47 @@ class FlickrToImmich:
                 logging.error("No photos found with engagement metrics")
                 return
 
-            # Group photos by privacy setting
-            privacy_groups = {
-                'public': [],
-                'friends_and_family': [],
-                'private': []
-            }
+            # Initialize privacy groups dynamically
+            privacy_groups = {}
 
+            # Group photos by exact privacy setting
             for photo in all_photos:
                 privacy = photo.get('privacy', '').lower()
+                if not privacy:
+                    privacy = 'private'  # Default to private if no setting
 
-                # Categorize photos based on privacy setting
-                if privacy == 'public':
-                    privacy_groups['public'].append(photo)
-                elif privacy in ['friends', 'family', 'friends and family']:
-                    privacy_groups['friends_and_family'].append(photo)
-                else:  # Default to private for any other setting
-                    privacy_groups['private'].append(photo)
+                if privacy not in privacy_groups:
+                    privacy_groups[privacy] = []
+                privacy_groups[privacy].append(photo)
+
+                # Log privacy settings for debugging
+                logging.debug(f"Photo {photo.get('id', 'unknown')}: privacy = {privacy}")
+
+            # Log summary of privacy groups found
+            logging.info("\nPrivacy groups found:")
+            for privacy, photos in privacy_groups.items():
+                logging.info(f"- {privacy}: {len(photos)} photos")
 
             # Sort each group by interestingness score
-            for group in privacy_groups.values():
+            for privacy, group in privacy_groups.items():
                 group.sort(key=lambda x: x['interestingness_score'], reverse=True)
                 # Add normalized scores within each privacy group
                 for i, photo in enumerate(group, 1):
                     photo['normalized_score'] = i
 
-            # Create albums for each privacy setting
-            privacy_folders = {
-                'public': 'Public_Highlights',
-                'friends_and_family': 'Friends_and_Family_Highlights',
-                'private': 'Private_Highlights'
-            }
-
-            for privacy, folder_name in privacy_folders.items():
-                photos = privacy_groups[privacy]
-                if not photos:
-                    logging.info(f"No photos found for {folder_name}")
-                    continue
+                # Create folder name based on privacy setting
+                folder_name = privacy.replace(' ', '_').title() + '_Highlights'
 
                 if time_period == 'all-time':
                     self._create_single_interesting_album(
                         highlights_dir / folder_name,
                         f"All Time {folder_name}",
-                        f"Your most engaging {privacy.replace('_', ' ')} Flickr photos across all time",
-                        photos
+                        f"Your most engaging {privacy} Flickr photos across all time",
+                        group
                     )
                 else:  # byyear
                     photos_by_year = {}
-                    for photo in photos:
+                    for photo in group:
                         year = photo['year_taken']
                         if year not in photos_by_year:
                             photos_by_year[year] = []
@@ -745,11 +738,15 @@ class FlickrToImmich:
                         self._create_single_interesting_album(
                             highlights_dir / folder_name,
                             f"{folder_name} {year}",
-                            f"Your most engaging {privacy.replace('_', ' ')} Flickr photos from {year}",
+                            f"Your most engaging {privacy} Flickr photos from {year}",
                             year_photos
                         )
 
-            logging.info("Finished creating highlight albums organized by privacy setting")
+            # Log the final folder structure created
+            logging.info("\nCreated highlight folders:")
+            for privacy in privacy_groups.keys():
+                folder_name = privacy.replace(' ', '_').title() + '_Highlights'
+                logging.info(f"- {folder_name}/")
 
         except Exception as e:
             logging.error(f"Error creating highlight albums: {str(e)}")
@@ -1253,16 +1250,106 @@ class FlickrToImmich:
             logging.error(error_msg)
             return False
 
-    def _embed_metadata(self, dest_file: Path, photo_json: Dict, media_type: MediaType):
-        """Helper method to embed metadata based on media type"""
-        if media_type == MediaType.IMAGE:
-            self._embed_image_metadata(dest_file, photo_json)
-            if self.write_xmp_sidecars:
-                self._write_xmp_sidecar(dest_file, photo_json)
-        elif media_type == MediaType.VIDEO:
-            self._embed_video_metadata(dest_file, photo_json)
-            if self.write_xmp_sidecars:
-                self._write_xmp_sidecar(dest_file, photo_json)
+    def _embed_image_metadata(self, photo_file: Path, metadata: Dict):
+        """Embed metadata into an image file using exiftool with enhanced error handling"""
+        try:
+            # Start with basic, safe metadata arguments
+            args = [
+                'exiftool',
+                '-overwrite_original',
+                '-ignoreMinorErrors',
+                '-m',
+                '-P',  # Preserve existing metadata
+                '-E',  # Extract embedded metadata
+
+                # Core metadata that's less likely to cause issues
+                f'-Description={metadata.get("description", "")}',
+                f'-Title={metadata.get("name", "")}',
+                f'-Author={self.account_data.get("real_name", "")}',
+                f'-Copyright={metadata.get("license", "All Rights Reserved")}',
+
+                # Handle date separately to avoid format issues
+                f'-DateTimeOriginal={metadata.get("date_taken", "")}',
+            ]
+
+            # Add keywords/tags safely
+            for tag in metadata.get('tags', []):
+                if isinstance(tag, dict) and 'tag' in tag:
+                    args.append(f'-Keywords={tag["tag"]}')
+
+            # Handle GPS data carefully
+            if metadata.get('geo'):
+                geo = metadata['geo']
+                if all(key in geo and isinstance(geo[key], (int, float))
+                    for key in ['latitude', 'longitude']):
+                    args.extend([
+                        f'-GPSLatitude={geo["latitude"]}',
+                        f'-GPSLongitude={geo["longitude"]}',
+                    ])
+
+            # Add the enhanced description using a more reliable field
+            enhanced_description = self._build_formatted_description(metadata)
+            args.extend([
+                f'-ImageDescription={enhanced_description}',
+                f'-IPTC:Caption-Abstract={enhanced_description}'
+            ])
+
+            # Add the target file at the end
+            args.append(str(photo_file))
+
+            # First, try to read existing metadata
+            check_args = ['exiftool', '-j', str(photo_file)]
+            try:
+                result = subprocess.run(check_args, capture_output=True, text=True)
+                if result.returncode == 0:
+                    logging.debug(f"Successfully read existing metadata from {photo_file}")
+                else:
+                    logging.warning(f"Warning reading metadata from {photo_file}: {result.stderr}")
+            except Exception as e:
+                logging.warning(f"Error checking existing metadata: {str(e)}")
+
+            # Now try to write the new metadata
+            result = subprocess.run(args, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, args, result.stdout, result.stderr)
+
+            if result.stderr:
+                # Log warnings but don't fail unless it's a critical error
+                if "Bad format" in result.stderr or "Suspicious IFD0" in result.stderr:
+                    logging.warning(f"Non-critical EXIF warning for {photo_file}: {result.stderr}")
+                else:
+                    logging.debug(f"Exiftool message for {photo_file}: {result.stderr}")
+
+        except subprocess.CalledProcessError as e:
+            if "Bad format" in str(e.stderr) or "Suspicious IFD0" in str(e.stderr):
+                # For known EXIF issues, try a more conservative approach
+                try:
+                    conservative_args = [
+                        'exiftool',
+                        '-overwrite_original',
+                        '-ignoreMinorErrors',
+                        '-m',
+                        f'-ImageDescription={enhanced_description}',
+                        f'-IPTC:Caption-Abstract={enhanced_description}',
+                        str(photo_file)
+                    ]
+                    result = subprocess.run(conservative_args, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        logging.info(f"Successfully embedded basic metadata in {photo_file} using conservative approach")
+                        return
+                except Exception as inner_e:
+                    logging.error(f"Error in conservative metadata embedding for {photo_file}: {str(inner_e)}")
+                    raise
+
+            error_msg = f"Error embedding metadata in {photo_file}: {e.stderr}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
+
+        except Exception as e:
+            error_msg = f"Unexpected error embedding metadata in {photo_file}: {str(e)}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
 
     def _load_photo_metadata(self, photo_id: str) -> Optional[Dict]:
         """Load metadata for a specific photo"""
@@ -1578,10 +1665,21 @@ def main():
     parser.add_argument('--results-dir', help='Directory to store the processing results log (default: same as output directory)')
     parser.add_argument('--no-extended-description', action='store_true', help='Only include original description, skip additional metadata')
     parser.add_argument('--no-xmp-sidecars', action='store_true', help='Skip writing XMP sidecar files')
+
+    # Export type flags
+    export_type = parser.add_mutually_exclusive_group()
+    export_type.add_argument('--export-interesting-only', action='store_true',
+                           help='Only export the highlights/interesting photos')
+    export_type.add_argument('--export-standard-only', action='store_true',
+                           help='Only export the standard library (by album or by date)')
+
+    # Interesting photos configuration
     parser.add_argument('--interesting-period', choices=['all-time', 'byyear'],
                        help='Time period for interesting photos: all-time or byyear')
     parser.add_argument('--interesting-count', type=int, default=100,
                        help='Number of interesting photos to fetch (max 500)')
+
+    # Organization configuration
     parser.add_argument('--organization', choices=['by_album', 'by_date'], default='by_album',
                        help='How to organize photos in the library: by_album or by_date')
     parser.add_argument('--date-format', choices=['yyyy/yyyy-mm-dd', 'yyyy/yyyy-mm', 'yyyy-mm-dd'],
@@ -1604,22 +1702,27 @@ def main():
             api_key=api_key,
             include_extended_description=not args.no_extended_description,
             write_xmp_sidecars=not args.no_xmp_sidecars,
-            resume=args.resume  # Add resume flag
+            resume=args.resume
         )
 
-        # Create album structure based on organization method
-        logging.info("Creating library structure...")
-        if args.organization == 'by_album':
-            converter.create_album_structure()
-        else:  # by_date
-            converter.create_date_structure(args.date_format)
+        # Determine what to export based on flags
+        export_standard = not args.export_interesting_only  # Export standard unless interesting-only flag is set
+        export_interesting = (not args.export_standard_only and args.interesting_period)  # Export interesting if period is set and not standard-only
 
-        # Process all media files
-        logging.info("Processing media files...")
-        converter.process_photos(args.organization, args.date_format)
+        # Create standard export (by_album or by_date) if needed
+        if export_standard:
+            logging.info("Creating standard library structure...")
+            if args.organization == 'by_album':
+                converter.create_album_structure()
+            else:  # by_date
+                converter.create_date_structure(args.date_format)
 
-        # Interestingness album creation (unchanged)
-        if args.interesting_period:
+            # Process all media files
+            logging.info("Processing media files for standard export...")
+            converter.process_photos(args.organization, args.date_format)
+
+        # Create interesting/highlights export if needed
+        if export_interesting:
             logging.info(f"Creating album(s) of interesting photos for {args.interesting_period}...")
             converter.create_interesting_albums(
                 args.interesting_period,
@@ -1632,12 +1735,15 @@ def main():
         # Write detailed results log
         converter.write_results_log()
 
-        logging.info("\nDone! Your photos have been organized into the following directories. See results log file for more details of successful, and failed images")
-        if args.organization == 'by_album':
-            logging.info(f"1. {args.output_dir}/full_library_export/by_album - Contains all your photos organized by album")
-        else:
-            logging.info(f"1. {args.output_dir}/full_library_export/by_date - Contains all your photos organized by date ({args.date_format})")
-        logging.info(f"2. {args.output_dir}/highlights_only - Contains your highlight collections")
+        # Print summary of what was exported
+        logging.info("\nExport Summary:")
+        if export_standard:
+            if args.organization == 'by_album':
+                logging.info(f"- Standard export (by album): {args.output_dir}/full_library_export/by_album")
+            else:
+                logging.info(f"- Standard export (by date): {args.output_dir}/full_library_export/by_date")
+        if export_interesting:
+            logging.info(f"- Highlights export: {args.output_dir}/highlights_only")
 
     except Exception as e:
         logging.error(f"Fatal error: {str(e)}")

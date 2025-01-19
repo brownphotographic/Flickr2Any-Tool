@@ -158,57 +158,62 @@ At a high level the user flow is this:
         python flickr-to-immich.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --organization by_album --interesting-period all-time --interesting-count 100
 
         *OPTIONAL FLAG USAGE*:
-        - Album output format. You have two options:
 
-            i) output flickr ALBUMS as folders. Do this if you want to use e.g. the Immich CLI import tool to load as albums.
-                WARNING: as Flickr allows you assign 1 image to many albums you may end up with duplicates in your library!
-                If like me and you tend to only assign 1 image to 1 album this will be fine and very much simplify library import to the tool of your choice
+        - Two main options: Export full library or just highlights ()
+           (If no flag set, then export both highlights and full library)
+           --export-interesting-only (only export the highlights)
+           --export-standard-only (exports the full library)
 
+          - Full library: folder output format. You have two options:
 
-                by album, set flag to  --organization by_album
-                    example:
-                    python flickr-to-immich.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --organization by_album
+              i) output flickr ALBUMS as folders. Do this if you want to use e.g. the Immich CLI import tool to load as albums.
+                  WARNING: as Flickr allows you assign 1 image to many albums you may end up with duplicates in your library!
+                  If like me and you tend to only assign 1 image to 1 album this will be fine and very much simplify library import to the tool of your choice
 
-            ii) output into folders by DATE CREATED. Do this if you don't want any duplicate images created.
-                WARNING: Your albums will only live as attributes in the XMP metadata and image EXIF in the description (should you choose to show the additional info there).
-                So if you are really worried about duplicates just use this option and then search the image description or metadata in the sidecar file to re-create your albums.
-                ... but that will be rather labor intensive!
-                (Note if you use Immich it doesn't support XMP metadata fully yet.)
+                  by album, set flag to  --organization by_album
+                      example:
+                      python flickr-to-immich.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --organization by_album
 
-                by date, set flag to --date-format <date format>
-                    e.g.
-                        --organization by_date --date-format yyyy/yyyy-mm-dd
-                        --organization by_date --date-format yyyy/yyyy-mm
-                        --organization by_date --date-format yyyy-mm
+              ii) output into folders by DATE CREATED. Do this if you don't want any duplicate images created.
+                  WARNING: Your albums will only live as attributes in the XMP metadata and image EXIF in the description (should you choose to show the additional info there).
+                  So if you are really worried about duplicates just use this option and then search the image description or metadata in the sidecar file to re-create your albums.
+                  ... but that will be rather labor intensive!
+                  (Note if you use Immich it doesn't support XMP metadata fully yet.)
 
-        - For creating 'My Highlights' folders automatically. This is sort of like flickr interestingness, but uses your own algorithm because Flickr's interestingness score is a black box
+                  by date, set flag to --date-format <date format>
+                      e.g.
+                          --organization by_date --date-format yyyy/yyyy-mm-dd
+                          --organization by_date --date-format yyyy/yyyy-mm
+                          --organization by_date --date-format yyyy-mm
 
-            This is useful if you want to show the most interesting photos from your library. For example maybe you only want to export those? Maybe you want to just load these to a sharing tool like PixelFed and load all the images to Immich? Your call!
+          - For creating 'My Highlights' folders automatically. This is sort of like flickr interestingness, but uses your own algorithm because Flickr's interestingness score is a black box
 
-            To change the scoring, scroll down to interestingness_score and make your algorithim reflect what you think is important!
-            (Note I called it interestingness_score becaused I originally set out to use flickr's interestigness method. I ran into issues, so instead made this approach
-            If you want me to implement the actual interestigness score from flickr, please add a feature request.)
+              This is useful if you want to show the most interesting photos from your library. For example maybe you only want to export those? Maybe you want to just load these to a sharing tool like PixelFed and load all the images to Immich? Your call!
 
-            default: interestingness_score = views + (faves * 10) + (comments * 5)
-            also not the cut-offs for what is interesting are as follows. To adjust them search for that in the code below
+              To change the scoring, scroll down to interestingness_score and make your algorithim reflect what you think is important!
+              (Note I called it interestingness_score becaused I originally set out to use flickr's interestigness method. I ran into issues, so instead made this approach
+              If you want me to implement the actual interestigness score from flickr, please add a feature request.)
 
-            search for this and modify!
-            if faves > 0 or comments > 0 or views >= 3:
+              default: interestingness_score = views + (faves * 10) + (comments * 5)
+              also not the cut-offs for what is interesting are as follows. To adjust them search for that in the code below
 
-            an integer number between 1 and the max number of images that will be exported as interesting.
+              search for this and modify!
+              if faves > 0 or comments > 0 or views >= 3:
 
-            Highest engagement gets rank 1
-            Lowest engagement gets rank N
+              an integer number between 1 and the max number of images that will be exported as interesting.
 
-            NOTE: You can opt to upload the highlights also to your tookl of choice. However note that it isn't the full library.
-            So why did I write this? So that I can create a folder of my best images, and upload them to a specific folder in Immich, or another more community sharing tool like Pixelfed
-            ... after all Immich (or PhotoPrism) are really tools for backing up and accessing your photos. They aren't really a photo platform like flickr is.
-            ... Flickr serves two purposes: 1) originally intended for community sharing; 2) backing up photos also
+              Highest engagement gets rank 1
+              Lowest engagement gets rank N
 
-            usage guide:
-            For all-time interesting photos set the --interesting-period flag to 'all-time'
-            For a interesting photo folders for images captured by year set the --interesting-period flag to 'byyear'
-            To set the number of images in the interestingness albums, set the --interesting-count flag e.g. 100
+              NOTE: You can opt to upload the highlights also to your tookl of choice. However note that it isn't the full library.
+              So why did I write this? So that I can create a folder of my best images, and upload them to a specific folder in Immich, or another more community focussed sharing tool like Pixelfed.
+              ... after all Immich (or PhotoPrism) are really tools for backing up and accessing your photos. They aren't really a photo platform like flickr is.
+              ... Flickr serves two purposes: 1) originally intended for community sharing; 2) backing up photos also
+
+              usage guide:
+              For all-time interesting photos set the --interesting-period flag to 'all-time'
+              For a interesting photo folders for images captured by year set the --interesting-period flag to 'byyear'
+              To set the number of images in the interestingness albums, set the --interesting-count flag e.g. 100
 
         - For exporting XMP Sidecars and embedding flickr metadata into the photo's EXIF description field:
             - Use defaults (both enabled)- no flags to add
