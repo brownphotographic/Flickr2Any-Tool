@@ -1,4 +1,6 @@
 **FLICKR EMMIGRATION TOOL**
+
+---------------------------
 by Rob Brown
 
 Copyright (C) 2025 Robert Brown
@@ -16,12 +18,17 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+---------------------------
+**INTRODUCTION**
+
 *What it does*
+
 Takes a Flickr library and reformats it to various options to allow importing to other tools like Immich, PhotoPrism, Pixelfed, your own computer etc etc
 It was written primarly to export to a folder format suitable for Immich and PixelFed
 ... but it gives generic outputs and lots of options and therefore is quite agnostic to the tool that is being used next. Yay for standards!
 
 *Why did I build this?*
+
 I am a 20 year user of Flickr. Flickr is a great tool for many reasons and serves a few core purposes:
 1. It was orignally conceived for users to post and share their photos online with each other. It still does this fairly well (your mileage may vary here)
 2. It allows for sharing photos with family and friends only (SO much better and more cleanly than Facebook or Instragram ever did)
@@ -37,6 +44,7 @@ I recently found the opensource solutions of Immich, PhotoPrism and Pixelfed, an
 So I wrote this (with some motivation from the Immich community)
 
 *How it works*
+
 At a high level the user flow is this:
 1. Request export of flickr account
 2. Unzip the files to folders (separate tool forthcoming to allow this to be made more autonomous)
@@ -44,13 +52,14 @@ At a high level the user flow is this:
 4. The tool exports photos and videos to a new folder maintaining the flickr metadata in a format that is meaningful to you.
 
 *Options of note*:
+
 - Export by date, or by album name
 - Highlights... create your own interestingness algorithm to allow you to export your top ranked images based on what you think is important.
 - Embedding metadata in the photos EXIF description (e.g. flickr faves, comments etc)
 - XMP sidecar files that contain the additional metadata that cannot be stored in a photos EXIF metadata
 - Resume function
 
-**Usage**
+**USAGE**
 
 (First Download the files. Go to Green <> Code button and download the zip file to your computer)
 
