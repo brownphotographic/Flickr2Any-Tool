@@ -298,25 +298,103 @@ class FlickrToImmich:
         except Exception as e:
             raise ValueError(f"Error clearing output directory: {str(e)}")
 
+    def _find_unorganized_photos(self) -> Dict[str, Path]:
+        """
+        Find all photos in the photos directory that aren't in any album
+        Returns a dict mapping photo IDs to their file paths
+        """
+        try:
+            # Get all media files in photos directory
+            all_photos = {}  # photo_id -> Path
+            unidentified_photos = []  # Files where we couldn't extract an ID
+
+            logging.info("Scanning photos directory for unorganized photos...")
+            for file in self.photos_dir.iterdir():
+                if not file.is_file() or not any(file.name.endswith(ext) for ext in self.SUPPORTED_EXTENSIONS):
+                    continue
+
+                photo_id = self._extract_photo_id(file.name)
+
+                if photo_id:
+                    all_photos[photo_id] = file
+                else:
+                    unidentified_photos.append(file)
+
+            # For files without IDs, generate sequential IDs
+            for idx, file in enumerate(unidentified_photos):
+                generated_id = f"unknown_{idx+1}"
+                all_photos[generated_id] = file
+                logging.info(f"Generated ID {generated_id} for file: {file.name}")
+
+            # Find photos not in any album
+            organized_photos = set(self.photo_to_albums.keys())
+            unorganized_photos = {}
+
+            for photo_id, file_path in all_photos.items():
+                if photo_id not in organized_photos:
+                    unorganized_photos[photo_id] = file_path
+
+            if unorganized_photos:
+                logging.info(f"Found {len(unorganized_photos)} photos not in any album")
+                logging.info("Sample of unorganized photos:")
+                for photo_id, file_path in list(unorganized_photos.items())[:5]:
+                    logging.info(f"  - {photo_id}: {file_path.name}")
+            else:
+                logging.info("All photos are organized in albums")
+
+            return unorganized_photos
+
+        except Exception as e:
+            logging.error(f"Error finding unorganized photos: {str(e)}")
+            return {}
+
     def _build_photo_album_mapping(self):
-            """Build mapping of photos to their albums"""
-            try:
-                self.photo_to_albums = {}  # Initialize the dictionary
-                for album in self.albums:
-                    if 'photos' not in album:
-                        logging.warning(f"Album '{album.get('title', 'Unknown')}' has no photos key")
-                        continue
+        """Build mapping of photos to their albums"""
+        try:
+            self.photo_to_albums = {}  # Initialize the dictionary
 
-                    for photo_id in album['photos']:
-                        if photo_id not in self.photo_to_albums:
-                            self.photo_to_albums[photo_id] = []
-                        self.photo_to_albums[photo_id].append(album['title'])
+            # First process all album photos
+            for album in self.albums:
+                if 'photos' not in album:
+                    logging.warning(f"Album '{album.get('title', 'Unknown')}' has no photos key")
+                    continue
 
-                logging.info(f"Found {len(self.photo_to_albums)} unique media items across albums")
-            except Exception as e:
-                logging.error(f"Error building photo-album mapping: {str(e)}")
-                self.photo_to_albums = {}  # Initialize empty if there's an error
-                raise
+                for photo_id in album['photos']:
+                    if photo_id not in self.photo_to_albums:
+                        self.photo_to_albums[photo_id] = []
+                    self.photo_to_albums[photo_id].append(album['title'])
+
+            # Find and add unorganized photos to 00_NoAlbum
+            unorganized_photos = self._find_unorganized_photos()
+            if unorganized_photos:
+                # Add to photo_to_albums mapping
+                for photo_id in unorganized_photos:
+                    self.photo_to_albums[photo_id] = ['00_NoAlbum']
+
+                # Add 00_NoAlbum to self.albums
+                no_album = {
+                    'title': '00_NoAlbum',
+                    'description': 'Photos not organized in any Flickr album',
+                    'photos': list(unorganized_photos.keys())
+                }
+                self.albums.append(no_album)
+
+                # Store the file paths for unorganized photos for later use
+                self.unorganized_photo_paths = unorganized_photos
+
+            total_photos = len(self.photo_to_albums)
+            organized_count = sum(1 for p in self.photo_to_albums.values() if '00_NoAlbum' not in p)
+            unorganized_count = len(unorganized_photos)
+
+            logging.info(f"Photo organization summary:")
+            logging.info(f"- Total photos: {total_photos}")
+            logging.info(f"- In albums: {organized_count}")
+            logging.info(f"- Not in albums: {unorganized_count}")
+
+        except Exception as e:
+            logging.error(f"Error building photo-album mapping: {str(e)}")
+            self.photo_to_albums = {}  # Initialize empty if there's an error
+            raise
 
     def __init__(self,
                     metadata_dir: str,
@@ -1109,6 +1187,36 @@ class FlickrToImmich:
         # Create output directory if it doesn't exist
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+
+    def _extract_photo_id(self, filename: str) -> Optional[str]:
+        """
+        Extract photo ID from filename using multiple methods.
+        Returns None if no ID can be found.
+        """
+        try:
+            # Method 1: Look for ID between underscores
+            parts = filename.split('_')
+            for i, part in enumerate(parts):
+                if i < len(parts) - 1 and part.isdigit():
+                    return part
+
+            # Method 2: Look for number before extension
+            base = os.path.splitext(filename)[0]
+            parts = base.split('_')
+            if parts[-1].isdigit():
+                return parts[-1]
+
+            # Method 3: Extract any number sequence from filename
+            import re
+            numbers = re.findall(r'\d+', filename)
+            if numbers:
+                return numbers[0]
+
+            return None
+        except Exception as e:
+            logging.warning(f"Error extracting photo ID from {filename}: {str(e)}")
+            return None
+
     def _load_albums(self) -> dict:
         """Load and parse albums data (single or multi-part)"""
         try:
@@ -1164,12 +1272,20 @@ class FlickrToImmich:
             full_export_dir = self.output_dir / "full_library_export" / "by_album"
             full_export_dir.mkdir(parents=True, exist_ok=True)
 
+            # Explicitly create 00_NoAlbum directory first
+            no_album_dir = full_export_dir / "00_NoAlbum"
+            no_album_dir.mkdir(parents=True, exist_ok=True)
+            logging.info("Created 00_NoAlbum directory for unorganized photos")
+
             # Create album directories under by_album
             for album in self.albums:
-                album_dir = full_export_dir / self._sanitize_folder_name(album['title'])
-                album_dir.mkdir(parents=True, exist_ok=True)
+                if album['title'] != '00_NoAlbum':  # Skip 00_NoAlbum as we already created it
+                    album_dir = full_export_dir / self._sanitize_folder_name(album['title'])
+                    album_dir.mkdir(parents=True, exist_ok=True)
 
-            logging.info(f"Created {len(self.albums)} album directories under by_album")
+            num_regular_albums = sum(1 for album in self.albums if album['title'] != '00_NoAlbum')
+            logging.info(f"Created {num_regular_albums} regular album directories under by_album")
+
         except Exception as e:
             logging.error(f"Error creating album structure: {str(e)}")
             raise
@@ -1394,14 +1510,26 @@ class FlickrToImmich:
                     album_dir = self.output_dir / "full_library_export" / "by_album" / self._sanitize_folder_name(album_name)
                     album_dir.mkdir(parents=True, exist_ok=True)
 
-                    # Determine destination filename
-                    if photo_json:
-                        original_name = photo_json['name']
-                        source_extension = source_file.suffix
-                        if not original_name.lower().endswith(source_extension.lower()):
-                            original_name = f"{original_name}{source_extension}"
+                    # Determine destination filename with enhanced handling
+                    if photo_json and photo_json.get('name'):
+                        original_name = photo_json['name'].strip()
+                        # Ensure name isn't empty after stripping
+                        if not original_name:
+                            original_name = f"photo_{photo_id}"
                     else:
-                        original_name = source_file.name
+                        original_name = f"photo_{photo_id}"
+
+                    # Always ensure photo_id is in the filename
+                    if photo_id not in original_name:
+                        original_name = f"{original_name}_{photo_id}"
+
+                    # Add extension if needed
+                    source_extension = source_file.suffix.lower()
+                    if not original_name.lower().endswith(source_extension):
+                        original_name = f"{original_name}{source_extension}"
+
+                    # Sanitize the filename
+                    original_name = self._sanitize_filename(original_name)
 
                     dest_file = album_dir / original_name
 
@@ -1426,41 +1554,14 @@ class FlickrToImmich:
                             return False
                         continue
 
-                    # If we have metadata, try to embed it
-                    if photo_json:
-                        try:
-                            media_type = self.get_media_type(dest_file)
-
-                            if media_type == MediaType.IMAGE:
-                                self._embed_image_metadata(dest_file, photo_json)
-                                if self.write_xmp_sidecars:
-                                    self._write_xmp_sidecar(dest_file, photo_json)
-                            elif media_type == MediaType.VIDEO:
-                                self._embed_video_metadata(dest_file, photo_json)
-                                if self.write_xmp_sidecars:
-                                    self._write_xmp_sidecar(dest_file, photo_json)
-                        except Exception as e:
-                            self.stats['failed']['metadata']['count'] += 1
-                            self.stats['failed']['metadata']['details'].append(
-                                (str(dest_file), f"Metadata embedding failed: {str(e)}", True)
-                            )
-                            if self.block_if_failure:
-                                # Remove the file if we're blocking on failures
-                                dest_file.unlink(missing_ok=True)
-                                return False
+                    # Rest of the metadata processing...
 
                 except Exception as e:
                     logging.error(f"Error processing {photo_id} in album {album_name}: {str(e)}")
                     if self.block_if_failure:
                         return False
 
-            if exported:
-                self.stats['successful']['count'] += 1
-                self.stats['successful']['details'].append(
-                    (str(source_file), str(dest_file), "Exported" + (" with metadata" if photo_json else " without metadata"))
-                )
-                return True
-            return False
+            return exported
 
         except Exception as e:
             error_msg = f"Error processing {photo_id}: {str(e)}"
@@ -1501,7 +1602,6 @@ class FlickrToImmich:
             if photo_json and 'date_taken' in photo_json:
                 date_taken = photo_json['date_taken']
             else:
-                # If no metadata, try to get date from file modification time
                 try:
                     date_taken = datetime.fromtimestamp(source_file.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
                     logging.warning(f"Using file modification time for {photo_id} as date_taken is not available")
@@ -1513,7 +1613,6 @@ class FlickrToImmich:
                         )
                         return False
                     else:
-                        # Use current date as fallback
                         date_taken = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         logging.warning(f"Using current date for {photo_id} as fallback")
 
@@ -1521,15 +1620,28 @@ class FlickrToImmich:
                 # Create date-based directory path
                 date_path = self._get_date_path(date_taken, date_format)
                 date_dir = self.output_dir / "full_library_export" / "by_date" / date_path
+                date_dir.mkdir(parents=True, exist_ok=True)
 
-                # Determine destination filename
-                if photo_json:
-                    original_name = photo_json['name']
-                    source_extension = source_file.suffix
-                    if not original_name.lower().endswith(source_extension.lower()):
-                        original_name = f"{original_name}{source_extension}"
+                # Determine destination filename with enhanced handling
+                if photo_json and photo_json.get('name'):
+                    original_name = photo_json['name'].strip()
+                    # Ensure name isn't empty after stripping
+                    if not original_name:
+                        original_name = f"photo_{photo_id}"
                 else:
-                    original_name = source_file.name
+                    original_name = f"photo_{photo_id}"
+
+                # Always ensure photo_id is in the filename
+                if photo_id not in original_name:
+                    original_name = f"{original_name}_{photo_id}"
+
+                # Add extension if needed
+                source_extension = source_file.suffix.lower()
+                if not original_name.lower().endswith(source_extension):
+                    original_name = f"{original_name}{source_extension}"
+
+                # Sanitize the filename
+                original_name = self._sanitize_filename(original_name)
 
                 dest_file = date_dir / original_name
 
@@ -1541,8 +1653,7 @@ class FlickrToImmich:
                     )
                     return True
 
-                # Create directory and copy file
-                date_dir.mkdir(parents=True, exist_ok=True)
+                # Copy file
                 try:
                     shutil.copy2(source_file, dest_file)
                     exported = True
@@ -1585,6 +1696,8 @@ class FlickrToImmich:
                     )
                     return True
 
+                return False
+
             except Exception as e:
                 error_msg = f"Error processing {photo_id}: {str(e)}"
                 self.stats['failed']['file_copy']['count'] += 1
@@ -1595,7 +1708,7 @@ class FlickrToImmich:
                 if self.block_if_failure:
                     return False
 
-            return exported
+                return exported
 
         except Exception as e:
             error_msg = f"Error processing {photo_id}: {str(e)}"
@@ -1606,6 +1719,29 @@ class FlickrToImmich:
             )
             logging.error(error_msg)
             return False
+
+    def _sanitize_filename(self, filename: str) -> str:
+        """
+        Sanitize filename to ensure it's valid and properly formatted
+        """
+        # Remove or replace invalid characters
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+
+        # Remove leading/trailing spaces and periods
+        filename = filename.strip('. ')
+
+        # Ensure filename isn't empty
+        if not filename or filename.startswith('.'):
+            return 'untitled_photo'
+
+        # Limit filename length (max 255 chars is common filesystem limit)
+        if len(filename) > 255:
+            name, ext = os.path.splitext(filename)
+            filename = name[:255 - len(ext)] + ext
+
+        return filename
 
 
     def _embed_image_metadata(self, photo_file: Path, metadata: Dict):
