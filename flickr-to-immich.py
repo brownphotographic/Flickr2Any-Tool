@@ -2733,7 +2733,7 @@ class FlickrToImmich:
         ]
 
         # Handle image orientation using PIL for verification
-        if media_file.suffix.lower() in ['.jpg', '.jpeg', '.tiff', '.tif']:
+        if media_file.suffix.lower() in ['.jpg', '.jpeg', '.tiff', '.tif', '.JPG', '.JPEG', '.TIFF', '.TIF']:
             try:
                 with Image.open(media_file) as img:
                     # Get existing EXIF data
@@ -2752,23 +2752,39 @@ class FlickrToImmich:
                         # If we have rotation metadata from Flickr
                         if 'rotation' in metadata:
                             rotation_degrees = int(metadata["rotation"])
-                            # Map Flickr's rotation degrees to EXIF orientation
-                            # Note: Flickr uses CCW rotation, EXIF uses CW
+                            # Updated rotation map that better handles portrait orientation
+                            # EXIF Orientation values:
+                            # 1 = 0 degrees: normal
+                            # 2 = 0 degrees, mirrored
+                            # 3 = 180 degrees
+                            # 4 = 180 degrees, mirrored
+                            # 5 = 90 degrees, mirrored
+                            # 6 = 90 degrees CW
+                            # 7 = 270 degrees, mirrored
+                            # 8 = 270 degrees CW
                             rotation_map = {
                                 0: 1,    # Normal
-                                90: 8,   # Rotate 270 CW (90 CCW)
+                                90: 6,   # Rotate 90 CW
                                 180: 3,  # Rotate 180
-                                270: 6   # Rotate 90 CW (270 CCW)
+                                270: 8   # Rotate 270 CW
                             }
+
+                            # Add orientation detection
+                            width, height = img.size
+                            is_portrait = height > width
+
                             new_orientation = rotation_map.get(rotation_degrees, 1)
+                            if is_portrait and new_orientation == 1:
+                                new_orientation = 6  # Set to 90 CW for portrait images
 
                             # Set orientation in EXIF
                             args.extend([
                                 f'-IFD0:Orientation#={new_orientation}',
-                                '-IFD0:YCbCrPositioning=1',  # Ensure proper color space positioning
-                                '-IFD0:YCbCrSubSampling=2 2'  # Standard chroma subsampling
+                                '-IFD0:YCbCrPositioning=1',
+                                '-IFD0:YCbCrSubSampling=2 2'
                             ])
-                            logging.debug(f"Setting new orientation: {new_orientation} for rotation {rotation_degrees}")
+                            logging.debug(f"Setting new orientation: {new_orientation} for rotation {rotation_degrees} (Portrait: {is_portrait})")
+
             except Exception as e:
                 logging.warning(f"Error checking image orientation: {str(e)}")
 
