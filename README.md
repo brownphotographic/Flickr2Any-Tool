@@ -160,8 +160,12 @@ Depending on how large your account is you may have hundreds of zip files! Note 
             python flickr-to-immich.py --help
         )
 
-        example:
+        example without zip file preprocessing:
         python flickr-to-immich.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --organization by_album --interesting-period all-time --interesting-count 100
+
+        example with zip file preprocessing:
+        python flickr-to-immich.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --zip-preprocessing --source-dir "./source" --organization by_album --interesting-period all-time --interesting-count 100
+
 
         **OPTIONAL FLAG USAGE**:
 
@@ -170,15 +174,24 @@ Depending on how large your account is you may have hundreds of zip files! Note 
            --export-interesting-only (only export the highlights)
            --export-standard-only (exports the full library)
 
-          - Full library: folder output format. You have two options:
+          - Full library: folder output format. You have three options:
+              using flag: --organization
 
               i) output flickr ALBUMS as folders. Do this if you want to use e.g. the Immich CLI import tool to load as albums.
                   WARNING: as Flickr allows you assign 1 image to many albums you may end up with duplicates in your library!
                   If like me and you tend to only assign 1 image to 1 album this will be fine and very much simplify library import to the tool of your choice
 
-                  by album, set flag to  --organization by_album
+                  set flag to:
+                  --organization by_album
                       example:
                       python flickr-to-immich.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --organization by_album
+
+                  then set date-format flag, which will add date folders to a 00_NoAlbum folder if there is no album metadata found for the photo.
+                  --date-format <date format>
+                      e.g.
+                          --organization by_album --date-format yyyy/yyyy-mm-dd
+                          --organization by_album --date-format yyyy/yyyy-mm
+                          --organization by_album --date-format yyyy-mm
 
               ii) output into folders by DATE CREATED. Do this if you don't want any duplicate images created.
                   WARNING: Your albums will only live as attributes in the XMP metadata and image EXIF in the description (should you choose to show the additional info there).
@@ -186,15 +199,34 @@ Depending on how large your account is you may have hundreds of zip files! Note 
                   ... but that will be rather labor intensive!
                   (Note if you use Immich it doesn't support XMP metadata fully yet.)
 
-                  by date, set flag to --date-format <date format>
-                      e.g.
-                          --organization by_date --date-format yyyy/yyyy-mm-dd
-                          --organization by_date --date-format yyyy/yyyy-mm
-                          --organization by_date --date-format yyyy-mm
+                  by date, set flag to:
+                  --organization by_date
+
+                  then set date-format flag as per (i)
+                  e.g.
+                  --organization by_date --date-format yyyy/yyyy-mm
+
+              iii) hybrid output:
+                  This option will create date folders first, then for any image that is associated with an album it will be inserted into that date folder as an album subfolder
+                  WARNING: This may be subject to a lot of duplication! For zero duplication use by_date. To preserve albums best use by_album.
+
+                  --organization hybrid
+
+                  then set date-format flag as per (i)
+                  e.g.
+                  --organization hybrid --date-format yyyy/yyyy-mm
 
           - For creating 'My Highlights' folders automatically. This is sort of like flickr interestingness, but uses your own algorithm because Flickr's interestingness score is a black box
 
               This is useful if you want to show the most interesting photos from your library. For example maybe you only want to export those? Maybe you want to just load these to a sharing tool like PixelFed and load all the images to Immich? Your call!
+
+              When you run this there will be the following folders created with the images that are unique to that privacy setting. This is useful if you (like me) want to see the differences between what is shared publicly vs for family.
+
+                  01_Private_Highlights/
+                  02_Friends_and_Family_Highlights/
+                  03_Friends_Highlights/
+                  04_Family_Highlights/
+                  05_Public_Highlights/
 
               To change the scoring, scroll down to interestingness_score and make your algorithim reflect what you think is important!
               (Note I called it interestingness_score becaused I originally set out to use flickr's interestigness method. I ran into issues, so instead made this approach
@@ -236,6 +268,18 @@ Depending on how large your account is you may have hundreds of zip files! Note 
         - Logging verbosity:
             Add this flag to make the console output just show status bar while running. The log files will show the errors:
             --quiet
+
+        - Zip file preprocessing:
+          Got a huge library? Can't figure out where to put the files from the downloaded zip files? Add this flag:
+
+          Create a folder called 'source' and move all of the zips you downloaded to that folder. Don't unzip them, just move them.
+          When the script runs with the following settings, all of the photos, videos and metadata will be automatically extracted into the appropriate folder.
+
+          Suggest that next time you run the script, you leave the following flags out of your command line instruction as the deletion of the images in the folders and zip file processing takes a long time.
+
+          --zip-preprocessing
+          then add after it the following flag and location to the folder with the zip files:
+          --source-dir "./source"
 
 
 6. **Import to your tool of choice**
