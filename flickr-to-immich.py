@@ -57,6 +57,57 @@ class MediaType(Enum):
 INCLUDE_EXTENDED_DESCRIPTION = True  # Set to False to only include original description
 WRITE_XMP_SIDECARS = True  # Set to False to skip writing XMP sidecar files
 
+EXIF_ORIENTATION_MAP = {
+    1: {
+        'text': 'top, left',
+        'description': 'Horizontal (normal)',
+        'rotation': 0,
+        'mirrored': False
+    },
+    2: {
+        'text': 'top, right',
+        'description': 'Mirror horizontal',
+        'rotation': 0,
+        'mirrored': True
+    },
+    3: {
+        'text': 'bottom, right',
+        'description': 'Rotate 180',
+        'rotation': 180,
+        'mirrored': False
+    },
+    4: {
+        'text': 'bottom, left',
+        'description': 'Mirror vertical',
+        'rotation': 180,
+        'mirrored': True
+    },
+    5: {
+        'text': 'left, right',
+        'description': 'Mirror horizontal and rotate 270 CW',
+        'rotation': 270,
+        'mirrored': True
+    },
+    6: {
+        'text': 'right, top',
+        'description': 'Rotate 90 CW',
+        'rotation': 90,
+        'mirrored': False
+    },
+    7: {
+        'text': 'right, bottom',
+        'description': 'Mirror horizontal and rotate 90 CW',
+        'rotation': 90,
+        'mirrored': True
+    },
+    8: {
+        'text': 'left, top',
+        'description': 'Rotate 270 CW',
+        'rotation': 270,
+        'mirrored': False
+    }
+}
+
 class FlickrPreprocessor:
     """Handles preprocessing of Flickr export zip files"""
 
@@ -1293,37 +1344,113 @@ class FlickrToImmich:
                 logging.error("No photos found with engagement metrics")
                 return
 
-            # Group photos by privacy setting
+            # Now we can log the count since all_photos is populated
+            logging.info(f"\nStarting privacy analysis of {len(all_photos)} photos")
+
+            # Initialize privacy groups with counts
             privacy_groups = {
                 'private': [],
                 'friends & family': [],
-                'friends': [],
-                'family': [],
+                'friends only': [],
+                'family only': [],
                 'public': []
             }
 
-            # Group photos by privacy setting with progress bar
-            with tqdm(all_photos, desc="Analyzing privacy settings", unit="photo") as pbar:
+            # Add diagnostic counters
+            privacy_values_found = {}
+
+            # Modified photo processing loop with diagnostic logging
+            with tqdm(all_photos,
+                     desc="Analyzing privacy settings",
+                     unit="photos",
+                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+                     disable=False) as pbar:
                 for photo in pbar:
-                    privacy = photo.get('privacy', '').lower()
-                    if not privacy:
-                        privacy = 'private'  # Default to private if no setting
+                    # Get raw privacy value and log it
+                    raw_privacy = photo.get('privacy', '')
 
-                    if privacy in privacy_groups:
-                        privacy_groups[privacy].append(photo)
+                    # Track unique privacy values we find
+                    if raw_privacy not in privacy_values_found:
+                        privacy_values_found[raw_privacy] = 0
+                    privacy_values_found[raw_privacy] += 1
+
+                    # Normalize privacy value
+                    privacy = raw_privacy.lower().strip()
+
+                    # Map privacy values
+                    privacy_mapping = {
+                        'private': 'private',
+                        'friends & family': 'friends & family',
+                        'friendsandfamily': 'friends & family',
+                        'friends and family': 'friends & family',
+                        'friends+family': 'friends & family',
+                        'friends & family': 'friends & family',
+                        'friends only': 'friends only',
+                        'friends': 'friends only',
+                        'family only': 'family only',
+                        'family': 'family only',
+                        'public': 'public',
+                        '': 'private'  # Default to private if empty
+                    }
+
+                    # Get normalized privacy value
+                    normalized_privacy = privacy_mapping.get(privacy, 'private')
+
+                    # Add to appropriate group
+                    if normalized_privacy in privacy_groups:
+                        privacy_groups[normalized_privacy].append(photo)
                     else:
-                        privacy_groups['private'].append(photo)  # If unknown privacy, treat as private
-                    pbar.set_postfix({'privacy': privacy})
+                        privacy_groups['private'].append(photo)
 
-            # Log summary of privacy groups found
-            logging.info("\nPrivacy groups found:")
+                    pbar.set_postfix({'privacy': normalized_privacy})
+
+            # Log what we found
+            logging.info("\nRaw privacy values found in metadata:")
+            for privacy, count in sorted(privacy_values_found.items()):
+                logging.info(f"'{privacy}': {count} photos")
+
+            logging.info("\nFinal privacy group counts:")
+            for group, photos in privacy_groups.items():
+                logging.info(f"{group}: {len(photos)} photos")
+
+            # Sample some photos from each group
+            logging.info("\nSample photos from each group:")
+            for group, photos in privacy_groups.items():
+                if photos:
+                    sample = photos[:3]  # Take up to 3 photos from each group
+                    logging.info(f"\n{group} samples:")
+                    for photo in sample:
+                        logging.info(f"  ID: {photo.get('id', 'unknown')}")
+                        logging.info(f"  Raw privacy: '{photo.get('privacy', '')}'")
+                        logging.info(f"  Title: '{photo.get('name', '')}'")
+
+            # First show overall stats
+            total_photos = sum(len(photos) for photos in privacy_groups.values())
+            logging.info(f"Total photos analyzed: {total_photos}")
+
+            # Show breakdown by privacy setting
             for privacy, photos in privacy_groups.items():
                 if photos:
-                    logging.info(f"- {privacy}: {len(photos)} photos")
+                    percentage = (len(photos) / total_photos) * 100
+                    logging.info(f"- {privacy}: {len(photos)} photos ({percentage:.1f}%)")
+                    # Show sample of raw privacy values for debugging
+                    if len(photos) > 0:
+                        sample_size = min(3, len(photos))
+                        logging.debug(f"  Sample raw privacy values for {privacy} group:")
+                        for photo in photos[:sample_size]:
+                            logging.debug(f"    - ID: {photo.get('id', 'unknown')}, Raw privacy: '{photo.get('privacy', '')}'")
+                else:
+                    logging.info(f"- {privacy}: 0 photos (0.0%)")
+
+            logging.info("-" * 30)
 
             # Process each privacy group
             total_groups = len([group for group in privacy_groups.values() if group])  # Only count non-empty groups
-            with tqdm(total=total_groups, desc="Processing privacy groups", unit="group") as group_pbar:
+            with tqdm(total=total_groups,
+                     desc="Processing privacy groups",
+                     unit="groups",
+                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+                     disable=False) as group_pbar:
                 for privacy, group in privacy_groups.items():
                     if group:  # Only process groups that have photos
                         group_pbar.set_postfix({'current': privacy})
@@ -2746,47 +2873,55 @@ class FlickrToImmich:
                                 orientation_tag = tag_id
                                 break
 
-                        current_orientation = exif.get(orientation_tag, 1)
-                        logging.debug(f"Current image orientation: {current_orientation}")
+                        current_orientation = exif.get(orientation_tag)
+                        width, height = img.size
+                        is_portrait = height > width
 
-                        # If we have rotation metadata from Flickr
+                        logging.debug(f"Processing orientation for {media_file}")
+                        logging.debug(f"Current EXIF orientation: {current_orientation}")
+                        logging.debug(f"Image dimensions: {width}x{height} (Portrait: {is_portrait})")
+
+                        # Determine new orientation
+                        new_orientation = 1  # Default to normal
                         if 'rotation' in metadata:
                             rotation_degrees = int(metadata["rotation"])
-                            # Updated rotation map that better handles portrait orientation
-                            # EXIF Orientation values:
-                            # 1 = 0 degrees: normal
-                            # 2 = 0 degrees, mirrored
-                            # 3 = 180 degrees
-                            # 4 = 180 degrees, mirrored
-                            # 5 = 90 degrees, mirrored
-                            # 6 = 90 degrees CW
-                            # 7 = 270 degrees, mirrored
-                            # 8 = 270 degrees CW
-                            rotation_map = {
-                                0: 1,    # Normal
-                                90: 6,   # Rotate 90 CW
-                                180: 3,  # Rotate 180
-                                270: 8   # Rotate 270 CW
+                            logging.debug(f"Flickr rotation value: {rotation_degrees}")
+
+                            # Map rotation degrees to orientation
+                            rotation_to_orientation = {
+                                0: 1 if not is_portrait else 6,    # Normal or rotate 90 CW for portrait
+                                90: 6,                             # Rotate 90 CW
+                                180: 3,                            # Rotate 180
+                                270: 8                             # Rotate 270 CW
                             }
 
-                            # Add orientation detection
-                            width, height = img.size
-                            is_portrait = height > width
+                            new_orientation = rotation_to_orientation.get(rotation_degrees, 1)
 
-                            new_orientation = rotation_map.get(rotation_degrees, 1)
-                            if is_portrait and new_orientation == 1:
-                                new_orientation = 6  # Set to 90 CW for portrait images
+                            # For portrait images that aren't already rotated
+                            if is_portrait and rotation_degrees == 0:
+                                new_orientation = 6  # Portrait images typically need 90° CW rotation
 
-                            # Set orientation in EXIF
-                            args.extend([
-                                f'-IFD0:Orientation#={new_orientation}',
-                                '-IFD0:YCbCrPositioning=1',
-                                '-IFD0:YCbCrSubSampling=2 2'
-                            ])
-                            logging.debug(f"Setting new orientation: {new_orientation} for rotation {rotation_degrees} (Portrait: {is_portrait})")
+                        # Log the orientation change
+                        if current_orientation != new_orientation:
+                            old_desc = EXIF_ORIENTATION_MAP.get(current_orientation, {}).get('description', 'Unknown')
+                            new_desc = EXIF_ORIENTATION_MAP.get(new_orientation, {}).get('description', 'Unknown')
+                            logging.debug(f"Changing orientation from {current_orientation} ({old_desc}) "
+                                        f"to {new_orientation} ({new_desc})")
+
+                        # Add orientation commands to exiftool args
+                        args.extend([
+                            f'-IFD0:Orientation#={new_orientation}',
+                            '-IFD0:YCbCrPositioning=1',
+                            '-IFD0:YCbCrSubSampling=2 2'
+                        ])
+
+                        # If the image is mirrored in its target orientation, add mirroring command
+                        if EXIF_ORIENTATION_MAP.get(new_orientation, {}).get('mirrored', False):
+                            args.extend(['-Flop'])  # Flop is horizontal mirroring
 
             except Exception as e:
-                logging.warning(f"Error checking image orientation: {str(e)}")
+                logging.warning(f"Error handling image orientation for {media_file}: {str(e)}")
+                logging.debug(f"Exception details:", exc_info=True)
 
         # Standard GPS data if available
         if metadata.get('geo'):
