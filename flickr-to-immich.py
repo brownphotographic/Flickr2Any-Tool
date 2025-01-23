@@ -565,6 +565,141 @@ class FlickrToImmich:
 
         return original_name
 
+    # THIS SECTION ENABLES ADDITIONAL METADATA TO BE ACCESSED FROM API IN PLACE OF THE JSON FILES, WHICH ARE UNRELIABLE
+    def _get_metadata_from_api(self, photo_id: str) -> Optional[Dict]:
+        """Get metadata from Flickr API with JSON fallback"""
+        logging.debug(f"\nAttempting API fetch for photo {photo_id}")
+        logging.debug(f"Flickr API initialized: {self.flickr is not None}")
+        logging.debug(f"API Key present: {bool(os.environ.get('FLICKR_API_KEY'))}")
+
+        if not self.flickr:
+            logging.debug("No Flickr API connection, falling back to JSON")
+            return self._load_json_metadata(photo_id)
+
+        try:
+            # Load base metadata from JSON
+            metadata = self._load_json_metadata(photo_id) or {}
+
+            # Get photo info from API
+            photo_info = self.flickr.photos.getInfo(
+                api_key=os.environ['FLICKR_API_KEY'],
+                photo_id=photo_id
+            )
+
+            # Extract all API fields using dedicated methods
+            self._extract_privacy_from_api(photo_info, metadata)
+            self._extract_albums_from_api(photo_id, metadata)
+            self._extract_orientation_from_api(photo_info, metadata)
+
+            return metadata
+
+        except Exception as e:
+            logging.debug(f"API fetch failed for photo {photo_id}, using JSON: {str(e)}")
+            return self._load_json_metadata(photo_id)
+
+    def _extract_privacy_from_api(self, photo_info, metadata: Dict):
+        """Extract privacy settings from API response using privacy level mapping"""
+        visibility = photo_info.find('photo/visibility')
+        if visibility is not None:
+            privacy_level = 5  # Default to private (5)
+
+            if int(visibility.get('ispublic', 0)):
+                privacy_level = 1
+            elif int(visibility.get('isfriend', 0)) and int(visibility.get('isfamily', 0)):
+                privacy_level = 4
+            elif int(visibility.get('isfriend', 0)):
+                privacy_level = 2
+            elif int(visibility.get('isfamily', 0)):
+                privacy_level = 3
+
+            # Map privacy level to string
+            privacy_map = {
+                1: 'public',
+                2: 'friends only',
+                3: 'family only',
+                4: 'friends & family',
+                5: 'private'
+            }
+            metadata['privacy'] = privacy_map[privacy_level]
+            metadata['privacy_level'] = privacy_level  # Store numeric level for reference
+
+    def _extract_albums_from_api(self, photo_id: str, metadata: Dict):
+        """Extract album information using photosets.getPhotos"""
+        try:
+            albums = []
+            # First get all photosets (albums) for the user
+            photosets = self.flickr.photosets.getList(
+                api_key=os.environ['FLICKR_API_KEY'],
+                user_id=self.account_data.get('nsid')
+            )
+
+            # For each photoset, check if our photo is in it
+            for photoset in photosets.findall('.//photoset'):
+                photoset_id = photoset.get('id')
+                photos = self.flickr.photosets.getPhotos(
+                    api_key=os.environ['FLICKR_API_KEY'],
+                    photoset_id=photoset_id,
+                    user_id=self.account_data.get('nsid')
+                )
+
+                # Check if our photo_id is in this photoset
+                for photo in photos.findall('.//photo'):
+                    if photo.get('id') == photo_id:
+                        albums.append(photoset.find('title').text)
+                        break  # Found in this album, no need to check rest of photos
+
+            if albums:
+                self.photo_to_albums[photo_id] = albums
+                metadata['albums'] = albums
+
+        except Exception as e:
+            logging.debug(f"Failed to get albums for {photo_id}: {str(e)}")
+
+    """
+    def _extract_orientation_from_api(self, photo_info, metadata: Dict):
+        Extract orientation information from API
+        try:
+            # Get orientation from photo info
+            photo_elem = photo_info.find('photo')
+            if photo_elem is not None:
+                rotation = photo_elem.get('rotation', '0')
+                metadata['rotation'] = int(rotation)
+
+                # Get additional orientation details if available
+                orientation = photo_elem.get('orientation', None)
+                if orientation:
+                    metadata['orientation'] = orientation
+        except Exception as e:
+            logging.debug(f"Failed to get orientation: {str(e)}")
+    """
+
+    def _load_json_metadata(self, photo_id: str) -> Optional[Dict]:
+        """Load metadata from JSON file only"""
+        try:
+            possible_patterns = [
+                f"photo_{photo_id}.json",
+                f"{photo_id}.json",
+                f"{int(photo_id):d}.json"
+            ]
+
+            for pattern in possible_patterns:
+                photo_file = self.metadata_dir / pattern
+                if photo_file.exists():
+                    with open(photo_file, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+
+            return None
+
+        except Exception as e:
+            logging.error(f"Error loading JSON metadata for photo {photo_id}: {str(e)}")
+            return None
+
+     # Replace original _load_photo_metadata with API-first version
+    _load_photo_metadata = _get_metadata_from_api
+
+
+    # END OF API METADATA
+
     def _find_unorganized_photos(self) -> Dict[str, Path]:
         """
         Find all photos in the photos directory that aren't in any album
@@ -728,6 +863,7 @@ class FlickrToImmich:
                     write_xmp_sidecars: bool = WRITE_XMP_SIDECARS,
                     block_if_failure: bool = False,
                     resume: bool = False,
+                    use_api: bool = False,
                     quiet: bool = False):
 
 
@@ -736,6 +872,8 @@ class FlickrToImmich:
             self.resume = resume
             self.date_format = date_format  # Now this will always have a value
             self.quiet = quiet
+            self.use_api = use_api
+
 
             # Track processing statistics
             self.stats = {
@@ -1220,110 +1358,93 @@ class FlickrToImmich:
             return []
 
     def _fetch_user_interesting_photos(self, time_period: str, per_page: int = 100) -> List[Dict]:
-        """Process user's photos and sort by engagement metrics."""
+        """Process user's photos and sort by engagement metrics using API when available"""
         try:
             photo_files = list(self.photos_dir.iterdir())
             photos = []
             processed = 0
             meeting_criteria = 0
 
-            # Create a temporary console handler for progress display
-            console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
-            formatter = logging.Formatter('%(message)s')
-            console_handler.setFormatter(formatter)
-            original_handlers = logging.getLogger().handlers
-            logging.getLogger().handlers = [console_handler]
+            with tqdm(total=len(photo_files),
+                     desc="Processing",
+                     unit="photos",
+                     disable=None) as pbar:
 
-            try:
-                # Initial header
-                logging.info("\nAnalyzing Photo Engagement")
-                logging.info("========================")
-
-                # Process photos with progress bar
-                with tqdm(total=len(photo_files),
-                        desc="Processing",
-                        unit="photos",
-                        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-                        disable=None
-                ) as pbar:
-
-                    for photo_file in photo_files:
-                        if not photo_file.is_file() or not any(photo_file.name.endswith(ext) for ext in self.SUPPORTED_EXTENSIONS):
-                            pbar.update(1)
-                            continue
-
-                        # Extract photo ID from filename
-                        photo_id = self._extract_photo_id(photo_file.name)
-                        if not photo_id:
-                            pbar.update(1)
-                            continue
-
-                        # Load metadata (silently)
-                        photo_metadata = self._load_photo_metadata(photo_id)
-                        if not photo_metadata:
-                            pbar.update(1)
-                            continue
-
-                        # Calculate engagement metrics
-                        faves = int(photo_metadata.get('count_faves', '0'))
-                        comments = int(photo_metadata.get('count_comments', '0'))
-                        views = int(photo_metadata.get('count_views', '0'))
-
-                        # Update progress bar with current photo info
-                        pbar.set_postfix_str(
-                            f"{os.path.basename(str(photo_file))} [♥{faves} 💬{comments}]"
-                        )
-
-                        processed += 1
-
-                        # Check if photo meets criteria
-                        if faves > 0 or comments > 0 or views >= 20:
-                            meeting_criteria += 1
-                            interestingness_score = (faves * 10) + (comments * 5) + (views * 0.1)
-
-                            photo_data = {
-                                'id': photo_id,
-                                'title': photo_metadata.get('name', ''),
-                                'description': photo_metadata.get('description', ''),
-                                'date_taken': photo_metadata.get('date_taken', ''),
-                                'license': photo_metadata.get('license', ''),
-                                'fave_count': faves,
-                                'comment_count': comments,
-                                'count_views': views,
-                                'interestingness_score': interestingness_score,
-                                'original_file': photo_file,
-                                'original': str(photo_file),
-                                'geo': photo_metadata.get('geo', None),
-                                'tags': photo_metadata.get('tags', []),
-                                'photopage': photo_metadata.get('photopage', ''),
-                                'privacy': photo_metadata.get('privacy', ''),
-                                'safety': photo_metadata.get('safety', '')
-                            }
-                            photos.append(photo_data)
-
+                for photo_file in photo_files:
+                    if not photo_file.is_file() or not any(photo_file.name.endswith(ext) for ext in self.SUPPORTED_EXTENSIONS):
                         pbar.update(1)
+                        continue
+
+                    photo_id = self._extract_photo_id(photo_file.name)
+                    if not photo_id:
+                        pbar.update(1)
+                        continue
+
+                    # Load base metadata
+                    photo_metadata = self._load_json_metadata(photo_id)
+                    if not photo_metadata:
+                        pbar.update(1)
+                        continue
+
+                    # Get engagement metrics from API if enabled
+                    if self.use_api and self.flickr:
+                        try:
+                            photo_info = self.flickr.photos.getInfo(
+                                api_key=os.environ['FLICKR_API_KEY'],
+                                photo_id=photo_id
+                            )
+
+                            # Parse engagement metrics from API
+                            stats = photo_info.find('photo/stats')
+                            if stats is not None:
+                                photo_metadata['count_views'] = int(stats.get('views', '0'))
+                                photo_metadata['count_faves'] = int(stats.get('favorites', '0'))
+                                photo_metadata['count_comments'] = int(stats.get('comments', '0'))
+
+                        except Exception as e:
+                            if not self.quiet:
+                                logging.debug(f"Using JSON metrics for {photo_id}: {str(e)}")
+
+                    # Calculate engagement metrics
+                    faves = int(photo_metadata.get('count_faves', '0'))
+                    comments = int(photo_metadata.get('count_comments', '0'))
+                    views = int(photo_metadata.get('count_views', '0'))
+
+                    pbar.set_postfix_str(
+                        f"{os.path.basename(str(photo_file))} [♥{faves} 💬{comments}]"
+                    )
+
+                    processed += 1
+
+                    if faves > 0 or comments > 0 or views >= 20:
+                        meeting_criteria += 1
+                        interestingness_score = (faves * 10) + (comments * 5) + (views * 0.1)
+
+                        photo_data = {
+                            'id': photo_id,
+                            'title': photo_metadata.get('name', ''),
+                            'description': photo_metadata.get('description', ''),
+                            'date_taken': photo_metadata.get('date_taken', ''),
+                            'license': photo_metadata.get('license', ''),
+                            'fave_count': faves,
+                            'comment_count': comments,
+                            'count_views': views,
+                            'interestingness_score': interestingness_score,
+                            'original_file': photo_file,
+                            'original': str(photo_file),
+                            'geo': photo_metadata.get('geo', None),
+                            'tags': photo_metadata.get('tags', []),
+                            'photopage': photo_metadata.get('photopage', ''),
+                            'privacy': photo_metadata.get('privacy', ''),
+                            'safety': photo_metadata.get('safety', '')
+                        }
+                        photos.append(photo_data)
+
+                    pbar.update(1)
 
                 # Sort by interestingness score
                 photos.sort(key=lambda x: x['interestingness_score'], reverse=True)
-
-                # Print summary
-                if photos:
-                    logging.info("\nResults")
-                    logging.info("-------")
-                    logging.info(f"Photos analyzed: {processed}")
-                    logging.info(f"Meeting criteria: {meeting_criteria}")
-                    score_range = f"{min(p['interestingness_score'] for p in photos):.1f} to {max(p['interestingness_score'] for p in photos):.1f}"
-                    logging.info(f"Score range: {score_range}")
-                    logging.info(f"Selected for export: {min(per_page, len(photos))}")
-                    logging.info("")  # Add blank line before next section
-
-                # Limit to requested number
                 return photos[:per_page]
-
-            finally:
-                # Restore original handlers
-                logging.getLogger().handlers = original_handlers
 
         except Exception as e:
             logging.error(f"Error processing photos: {str(e)}")
@@ -1380,18 +1501,19 @@ class FlickrToImmich:
                     # Map privacy values
                     privacy_mapping = {
                         'private': 'private',
+                        'friend & family': 'friends & family',   # Add this exact match from your metadata
                         'friends & family': 'friends & family',
-                        'friendsandfamily': 'friends & family',
+                        'friends&family': 'friends & family',
+                        'friendandfamily': 'friends & family',
+                        'friend and family': 'friends & family',
                         'friends and family': 'friends & family',
-                        'friends+family': 'friends & family',
-                        'friends & family': 'friends & family',
-                        'friends only': 'friends only',
                         'friends': 'friends only',
-                        'family only': 'family only',
+                        'friend': 'friends only',                # Add singular version
                         'family': 'family only',
                         'public': 'public',
                         '': 'private'  # Default to private if empty
                     }
+
 
                     # Get normalized privacy value
                     normalized_privacy = privacy_mapping.get(privacy, 'private')
@@ -2575,48 +2697,50 @@ class FlickrToImmich:
             return False
 
     def _load_photo_metadata(self, photo_id: str) -> Optional[Dict]:
-        """Load metadata for a specific photo with enhanced file finding and logging"""
-        try:
-            # Try different possible metadata file patterns
-            possible_patterns = [
-                f"photo_{photo_id}.json",
-                f"photo_{int(photo_id):d}.json",  # Handle numerical IDs
-                f"photo_{photo_id.lstrip('0')}.json",  # Handle IDs with leading zeros
-                f"{photo_id}.json",  # Try without 'photo_' prefix
-                f"{int(photo_id):d}.json"  # Try without prefix and as integer
-            ]
+       """Load metadata for a specific photo"""
+       metadata = self._load_json_metadata(photo_id)
+       if not metadata:
+           return None
 
-            # Debug log the search patterns
-            logging.debug(f"Searching for metadata for photo {photo_id}")
-            logging.debug(f"Looking in directory: {self.metadata_dir}")
-            logging.debug(f"Trying patterns: {possible_patterns}")
+       if self.use_api and self.flickr:
+           try:
+               photo_info = self.flickr.photos.getInfo(
+                   api_key=os.environ['FLICKR_API_KEY'],
+                   photo_id=photo_id
+               )
 
-            # Try each pattern
-            for pattern in possible_patterns:
-                photo_file = self.metadata_dir / pattern
-                if photo_file.exists():
-                    logging.debug(f"Found metadata file: {photo_file}")
-                    with open(photo_file, 'r', encoding='utf-8') as f:
-                        return json.load(f)
-                else:
-                    logging.debug(f"Pattern {pattern} not found")
+               self._extract_privacy_from_api(photo_info, metadata)
+               self._extract_albums_from_api(photo_id, metadata)
+               #self._extract_orientation_from_api(photo_info, metadata)
 
-            # If we get here, we couldn't find the file
-            # Do a directory listing to help debug
-            logging.debug("Listing all JSON files in metadata directory:")
-            json_files = list(self.metadata_dir.glob("*.json"))
-            logging.debug(f"Found {len(json_files)} JSON files")
-            if len(json_files) > 0:
-                logging.debug("Sample of JSON files found:")
-                for f in json_files[:5]:  # Show first 5 files
-                    logging.debug(f"  - {f.name}")
+           except Exception as e:
+               if not self.quiet:
+                   logging.debug(f"API fetch failed for photo {photo_id}")
 
-            logging.debug(f"Metadata file not found for photo {photo_id} after trying all patterns")
-            return None
+       return metadata
 
-        except Exception as e:
-            logging.error(f"Error loading metadata for photo {photo_id}: {str(e)}")
-            return None
+    def _load_json_metadata(self, photo_id: str) -> Optional[Dict]:
+       """Load metadata from JSON file only"""
+       try:
+           possible_patterns = [
+               f"photo_{photo_id}.json",
+               f"photo_{int(photo_id):d}.json",
+               f"photo_{photo_id.lstrip('0')}.json",
+               f"{photo_id}.json",
+               f"{int(photo_id):d}.json"
+           ]
+
+           for pattern in possible_patterns:
+               photo_file = self.metadata_dir / pattern
+               if photo_file.exists():
+                   with open(photo_file, 'r', encoding='utf-8') as f:
+                       return json.load(f)
+
+           return None
+
+       except Exception as e:
+           logging.error(f"Error loading JSON metadata for photo {photo_id}: {str(e)}")
+           return None
 
     def _find_photo_file(self, photo_id: str, filename: str) -> Optional[Path]:
         """Find the original photo file using the Flickr ID with enhanced logging"""
@@ -2859,7 +2983,6 @@ class FlickrToImmich:
             *[f'-Keywords={tag["tag"]}' for tag in metadata.get('tags', [])],
         ]
 
-        # Handle image orientation using PIL for verification
         if media_file.suffix.lower() in ['.jpg', '.jpeg', '.tiff', '.tif', '.JPG', '.JPEG', '.TIFF', '.TIF']:
             try:
                 with Image.open(media_file) as img:
@@ -2881,25 +3004,40 @@ class FlickrToImmich:
                         logging.debug(f"Current EXIF orientation: {current_orientation}")
                         logging.debug(f"Image dimensions: {width}x{height} (Portrait: {is_portrait})")
 
-                        # Determine new orientation
-                        new_orientation = 1  # Default to normal
-                        if 'rotation' in metadata:
+                        # Determine orientation
+                        if current_orientation is None:
+                            new_orientation = 1  # Default if no EXIF orientation
+                        elif 'rotation' in metadata:
                             rotation_degrees = int(metadata["rotation"])
                             logging.debug(f"Flickr rotation value: {rotation_degrees}")
 
-                            # Map rotation degrees to orientation
-                            rotation_to_orientation = {
-                                0: 1 if not is_portrait else 6,    # Normal or rotate 90 CW for portrait
-                                90: 6,                             # Rotate 90 CW
-                                180: 3,                            # Rotate 180
-                                270: 8                             # Rotate 270 CW
+                            if rotation_degrees > 0:
+                                rotation_to_orientation = {
+                                    90: 6,    # Rotate 90 CW
+                                    180: 3,   # Rotate 180
+                                    270: 8    # Rotate 270 CW
+                                }
+                                new_orientation = rotation_to_orientation.get(rotation_degrees, 1)
+                            else:
+                                new_orientation = current_orientation
+                        else:
+                            new_orientation = current_orientation
+
+                        # Handle combined rotations
+                        if current_orientation and new_orientation != current_orientation:
+                            # Calculate combined rotation
+                            current_rotation = EXIF_ORIENTATION_MAP.get(current_orientation, {}).get('rotation', 0)
+                            new_rotation = EXIF_ORIENTATION_MAP.get(new_orientation, {}).get('rotation', 0)
+                            total_rotation = (current_rotation + new_rotation) % 360
+
+                            # Map total rotation back to orientation
+                            rotation_to_final = {
+                                0: 1,
+                                90: 6,
+                                180: 3,
+                                270: 8
                             }
-
-                            new_orientation = rotation_to_orientation.get(rotation_degrees, 1)
-
-                            # For portrait images that aren't already rotated
-                            if is_portrait and rotation_degrees == 0:
-                                new_orientation = 6  # Portrait images typically need 90° CW rotation
+                            new_orientation = rotation_to_final.get(total_rotation, 1)
 
                         # Log the orientation change
                         if current_orientation != new_orientation:
@@ -3044,6 +3182,9 @@ def main():
     parser.add_argument('--date-format', choices=['yyyy', 'yyyy-mm', 'yyyy/yyyy-mm-dd', 'yyyy/yyyy-mm', 'yyyy-mm-dd'],
                        default='yyyy/yyyy-mm',
                        help='Date format for folder structure when using by_date organization')
+
+    parser.add_argument('--use-api', action='store_true',
+                       help='Use Flickr API to fetch additional metadata (privacy, albums, etc.)')
 
     api_key = os.environ.get('FLICKR_API_KEY')
     args = parser.parse_args()

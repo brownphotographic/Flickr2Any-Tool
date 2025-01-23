@@ -30,12 +30,12 @@ It was written primarly to export to a folder format suitable for Immich and Pix
 **Why did I build this?**
 
 I am a 20 year user of Flickr. Flickr is a great tool for many reasons and serves a few core purposes:
-1. It was orignally conceived for users to post and share their photos online with each other. It still does this fairly well (your mileage may vary here)
-2. It allows for sharing photos with family and friends only (SO much better and more cleanly than Facebook or Instragram ever did)
+1. It was originally conceived for users to post and share their photos online with each other. It still does this fairly well (your mileage may vary here)
+2. It allows for sharing photos with family and friends only (SO much better and more cleanly than Facebook or Instagram ever did)
 3. It has become (for many) a place to just backup and not share photos.
 
 Over time I have become disenchanted with Flickr
-- The recent prevelance of AI generated content (ie not photos by photographers) is starting to take over the central feed
+- The recent prevalence of AI generated content (ie not photos by photographers) is starting to take over the central feed
 - It costs money to be part of the service. I always thought Flickr could be a forever home for my photos, but if you add this up over time it can get super expensive.
 - I also dabbled with Instagram and had my account killed off with zero notice. I dislike the inability to control my own destiny, and therefore want more control.
 
@@ -137,7 +137,7 @@ Depending on how large your account is you may have hundreds of zip files! Note 
                         # Now install the dependencies in the virtual environment
                         pip install -r package_dependencies.txt
 
-5. **Set up envirnoment and run the script**:
+5. **Set up environment and run the script**:
     - First open your terminal and navigate to the folder where your script is stored
     - if you are using a virtual environment (see Flickr API section above), you must first activate the virtual env before running the above line:
         i) Run this - a one time setup for the directory you are running the script in:
@@ -280,6 +280,13 @@ Depending on how large your account is you may have hundreds of zip files! Note 
           --zip-preprocessing
           then add after it the following flag and location to the folder with the zip files:
           --source-dir "./source"
+
+
+          #EXPERIMENTAL:
+          - Use the Flickr API to get specific attribute instead of using the local JSON.
+          -- use-api
+          WARNING: This method is far slower, and was intended to solve an issue where JSON was incorrectly populated for privacy settings and albums
+          ... it looks actually like: Privacy and albums is a bug in Flickr's code. Bugs are to be logged with flickr on that.
 
 
 6. **Import to your tool of choice**
