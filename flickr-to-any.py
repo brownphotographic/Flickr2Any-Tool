@@ -1,7 +1,7 @@
 """
-**** FLICKR EMMIGRATION TOOL ****
+**** FLICKR to ANY TOOL ****
 by Rob Brown
-https://github.com/brownphotographic/Flickr-Emmigration-Tool
+https://github.com/brownphotographic/Flickr2Any-Tool
 
 Copyright (C) 2025 Robert Brown
 

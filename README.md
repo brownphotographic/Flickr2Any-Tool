@@ -1,4 +1,4 @@
-**FLICKR EMMIGRATION TOOL**
+**FLICKR to ANY TOOL**
 
 ---------------------------
 by Rob Brown
@@ -89,8 +89,7 @@ Depending on how large your account is you may have hundreds of zip files! Note 
         - folder: results
         - folder (will be created automatically by this script if not already existing): output
         - files: script files including:
-                - flickr-to-immich.py
-                - flickr-to-folders.py
+                - flickr-to-any.py
                 - package_dependencies.txt
 
     Extract the zip files accordingly:
@@ -157,14 +156,14 @@ Depending on how large your account is you may have hundreds of zip files! Note 
             e.g. instead of ./ (which would be in the same directory as the script, remove the . and change it to something like '/folder_location_on_my_nas/metadata'
 
         (run this command to see all options. These are also described below in OPTIONAL FLAG USAGE:
-            python flickr-to-immich.py --help
+            python flickr-to-any.py --help
         )
 
         example without zip file preprocessing:
-        python flickr-to-immich.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --organization by_album --interesting-period all-time --interesting-count 100
+        python flickr-to-any.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --organization by_album --interesting-period all-time --interesting-count 100
 
         example with zip file preprocessing:
-        python flickr-to-immich.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --zip-preprocessing --source-dir "./source" --organization by_album --interesting-period all-time --interesting-count 100
+        python flickr-to-any.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --zip-preprocessing --source-dir "./source" --organization by_album --interesting-period all-time --interesting-count 100
 
 
         **OPTIONAL FLAG USAGE**:
@@ -184,7 +183,7 @@ Depending on how large your account is you may have hundreds of zip files! Note 
                   set flag to:
                   --organization by_album
                       example:
-                      python flickr-to-immich.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --organization by_album
+                      python flickr-to-any.py --metadata-dir "./metadata" --photos-dir "./photos" --output-dir "./output" --organization by_album
 
                   then set date-format flag, which will add date folders to a 00_NoAlbum folder if there is no album metadata found for the photo.
                   --date-format <date format>
