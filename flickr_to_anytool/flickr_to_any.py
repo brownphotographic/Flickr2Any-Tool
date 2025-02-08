@@ -19,7 +19,6 @@ This program is free software: you can redistribute it and/or modify
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 For usage instructions please see the README file.
-
 """
 
 import bdb
@@ -33,10 +32,10 @@ import subprocess
 import logging
 from pathlib import Path
 import mimetypes
-import argparse
 from tqdm import tqdm
 import os
 import io
+import wx
 import flickrapi
 import xml.etree.ElementTree as ET
 from importlib import metadata
@@ -46,6 +45,20 @@ import concurrent.futures
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import ExifTags
+from gooey import Gooey, GooeyParser
+import argparse
+import sys
+import traceback
+from tqdm import tqdm
+import time
+
+
+# Configure environment for progress bars
+os.environ['TQDM_DISABLE'] = 'false'
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+
+def is_cli_mode():
+    return '--cli' in sys.argv
 
 class MediaType(Enum):
     """Supported media types"""
@@ -107,6 +120,56 @@ EXIF_ORIENTATION_MAP = {
         'mirrored': False
     }
 }
+
+def setup_directory_widgets(preprocessing, main_settings):
+    """Add directory widgets to existing argument groups"""
+
+    # Add source directory widget
+    source_dir = preprocessing.add_argument(
+        '--source-dir',
+        metavar='Source Directory',
+        widget='DirChooser',
+        help='Directory for Flickr zip files',
+        gooey_options={'full_width': True}
+    )
+
+    # Add metadata directory widget
+    metadata_dir = main_settings.add_argument(
+        '--metadata-dir',
+        metavar='Metadata Directory',
+        widget='DirChooser',
+        help='Directory for metadata files',
+        gooey_options={'full_width': True}
+    )
+
+    # Add photos directory widget
+    photos_dir = main_settings.add_argument(
+        '--photos-dir',
+        metavar='Photos Directory',
+        widget='DirChooser',
+        help='Directory for photos',
+        gooey_options={'full_width': True}
+    )
+
+    # Add output directory widget
+    output_dir = main_settings.add_argument(
+        '--output-dir',
+        metavar='Output Directory',
+        widget='DirChooser',
+        help='Directory for output files',
+        gooey_options={'full_width': True}
+    )
+
+    # Add results directory widget
+    results_dir = main_settings.add_argument(
+        '--results-dir',
+        metavar='Results Directory',
+        widget='DirChooser',
+        help='Directory for results files',
+        gooey_options={'full_width': True}
+    )
+
+    return preprocessing, main_settings
 
 class FlickrPreprocessor:
     """Handles preprocessing of Flickr export zip files"""
@@ -172,22 +235,27 @@ class FlickrPreprocessor:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 # Get list of files to extract
                 files = zip_ref.namelist()
+                total_files = len(files)
                 processed = 0
                 errors = []
 
-                # Extract files with progress bar
-                with tqdm(total=len(files),
-                         desc=f"Extracting {desc}",
-                         unit="files",
-                         disable=None
-                ) as pbar:
-                    for file in files:
-                        try:
-                            zip_ref.extract(file, extract_path)
-                            processed += 1
-                        except Exception as e:
-                            errors.append(f"Error extracting {file} from {zip_path.name}: {str(e)}")
-                        pbar.update(1)
+                # Extract files with status updates
+                print(f"Extracting {desc}")  # Initial message
+                for i, file in enumerate(files, 1):
+                    try:
+                        zip_ref.extract(file, extract_path)
+                        processed += 1
+                        # Show progress with current filename (truncated if too long)
+                        filename = os.path.basename(file)
+                        if len(filename) > 30:  # Truncate long filenames
+                            filename = filename[:27] + "..."
+                        print(f"\rExtracting: {i}/{total_files} ({(i/total_files)*100:.1f}%) - {filename}",
+                              end='', flush=True)
+                    except Exception as e:
+                        errors.append(f"Error extracting {file} from {zip_path.name}: {str(e)}")
+
+                print()  # Final newline
+                print(f"Completed: {processed} files extracted")  # Final status
 
                 return processed, errors
 
@@ -227,7 +295,8 @@ class FlickrPreprocessor:
                                  total=len(zip_files),
                                  desc="Processing zip files",
                                  unit="files",
-                                 disable=False):
+                                 disable=False,
+                                 file=sys.stdout):
                     zip_path = future_to_zip[future]
                     try:
                         processed, errors = future.result()
@@ -864,7 +933,13 @@ class FlickrToImmich:
                     block_if_failure: bool = False,
                     resume: bool = False,
                     use_api: bool = False,
-                    quiet: bool = False):
+                    quiet: bool = False,
+                    fave_weight: float = 10.0,
+                    comment_weight: float = 3.0,
+                    view_weight: float = 5.0,
+                    min_views: int = 10,
+                    min_faves: int = 2,
+                    min_comments: int = 0):
 
 
             # First, set all parameters as instance attributes
@@ -951,6 +1026,14 @@ class FlickrToImmich:
             self.account_data = None
             self.user_mapping = {}
             self.photo_to_albums: Dict[str, List[str]] = {}
+
+            #interestingness / hightlights
+            self.fave_weight = fave_weight
+            self.comment_weight = comment_weight
+            self.view_weight = view_weight
+            self.min_views = min_views
+            self.min_faves = min_faves
+            self.min_comments = min_comments
 
     #       # Validate directories
     #       self._validate_directories()
@@ -1072,8 +1155,8 @@ class FlickrToImmich:
 
                 # Write summary counts
                 f.write("SUMMARY\n-------\n")
-                f.write(f"Total files processed: {self.stats['total_files']}\n")
-                f.write(f"Successfully processed: {self.stats['successful']['count']}\n")
+                f.write(f"Total photos/videos processed: {self.stats['total_files']}\n")
+                f.write(f"Successfully processed files: {self.stats['successful']['count']}\n")
                 f.write(f"Failed metadata: {self.stats['failed']['metadata']['count']}\n")
                 f.write(f"Failed file copy: {self.stats['failed']['file_copy']['count']}\n")
                 f.write(f"Skipped: {self.stats['skipped']['count']}\n")
@@ -1165,6 +1248,13 @@ class FlickrToImmich:
         Returns:
             Either a merged dictionary or list, depending on the data structure
         """
+        logging.info(f"Loading {base_name} files...")
+        data_files = self._find_json_files(base_name)
+        total_files = len(data_files)
+
+        for i, data_file in enumerate(data_files, 1):
+            logging.info(f"Processing file {i}/{total_files} ({(i/total_files)*100:.1f}%)")
+
         data_files = self._find_json_files(base_name)
 
         if not data_files:
@@ -1252,20 +1342,44 @@ class FlickrToImmich:
         return username
 
     def _load_account_profile(self):
-        """Load the account profile data"""
-        profile_file = self.metadata_dir / 'account_profile.json'
-        try:
-            if not profile_file.exists():
-                logging.warning("account_profile.json not found, some metadata will be missing")
-                self.account_data = {}
-                return
+        """Load the account profile data with progress indication"""
+        with tqdm(total=100, desc="Loading account profile", unit="%") as pbar:
+            profile_file = self.metadata_dir / 'account_profile.json'
+            pbar.update(20)  # Show progress for finding file
 
-            with open(profile_file, 'r', encoding='utf-8') as f:
-                self.account_data = json.load(f)
-                logging.info(f"Loaded account profile for {self.account_data.get('real_name', 'unknown user')}")
-        except Exception as e:
-            logging.error(f"Error loading account profile: {str(e)}")
-            self.account_data = {}
+            try:
+                if not profile_file.exists():
+                    logging.warning("account_profile.json not found, some metadata will be missing")
+                    self.account_data = {}
+                    pbar.update(80)  # Complete the progress bar
+                    return
+
+                pbar.update(30)  # Show progress for file check
+
+                with open(profile_file, 'r', encoding='utf-8') as f:
+                    self.account_data = json.load(f)
+                    pbar.update(40)  # Show progress for loading
+
+                    user_name = self.account_data.get('real_name', 'unknown user')
+                    logging.info(f"Loaded account profile for {user_name}")
+
+                    # Log some account details
+                    logging.debug("Account details loaded:")
+                    logging.debug(f"- Username: {self.account_data.get('screen_name', 'unknown')}")
+                    logging.debug(f"- Join date: {self.account_data.get('join_date', 'unknown')}")
+                    logging.debug(f"- NSID: {self.account_data.get('nsid', 'unknown')}")
+
+                    pbar.update(10)  # Final progress update
+
+            except json.JSONDecodeError as e:
+                logging.error(f"Error decoding account profile JSON: {str(e)}")
+                self.account_data = {}
+                pbar.update(100)  # Complete the progress bar
+
+            except Exception as e:
+                logging.error(f"Error loading account profile: {str(e)}")
+                self.account_data = {}
+                pbar.update(100)  # Complete the progress bar
 
     def _process_user_mappings(self):
         """Process user mappings from loaded contacts data"""
@@ -1361,90 +1475,96 @@ class FlickrToImmich:
         """Process user's photos and sort by engagement metrics using API when available"""
         try:
             photo_files = list(self.photos_dir.iterdir())
+            total_files = len(photo_files)
             photos = []
             processed = 0
             meeting_criteria = 0
 
-            with tqdm(total=len(photo_files),
-                     desc="Processing",
-                     unit="photos",
-                     disable=None) as pbar:
+            print(f"Processing {total_files} photos...")
 
-                for photo_file in photo_files:
-                    if not photo_file.is_file() or not any(photo_file.name.endswith(ext) for ext in self.SUPPORTED_EXTENSIONS):
-                        pbar.update(1)
-                        continue
+            for i, photo_file in enumerate(photo_files, 1):
+                if not photo_file.is_file() or not any(photo_file.name.endswith(ext) for ext in self.SUPPORTED_EXTENSIONS):
+                    continue
 
-                    photo_id = self._extract_photo_id(photo_file.name)
-                    if not photo_id:
-                        pbar.update(1)
-                        continue
+                photo_id = self._extract_photo_id(photo_file.name)
+                if not photo_id:
+                    continue
 
-                    # Load base metadata
-                    photo_metadata = self._load_json_metadata(photo_id)
-                    if not photo_metadata:
-                        pbar.update(1)
-                        continue
+                # Load base metadata
+                photo_metadata = self._load_json_metadata(photo_id)
+                if not photo_metadata:
+                    continue
 
-                    # Get engagement metrics from API if enabled
-                    if self.use_api and self.flickr:
-                        try:
-                            photo_info = self.flickr.photos.getInfo(
-                                api_key=os.environ['FLICKR_API_KEY'],
-                                photo_id=photo_id
-                            )
+                # Get engagement metrics from API if enabled
+                if self.use_api and self.flickr:
+                    try:
+                        photo_info = self.flickr.photos.getInfo(
+                            api_key=os.environ['FLICKR_API_KEY'],
+                            photo_id=photo_id
+                        )
 
-                            # Parse engagement metrics from API
-                            stats = photo_info.find('photo/stats')
-                            if stats is not None:
-                                photo_metadata['count_views'] = int(stats.get('views', '0'))
-                                photo_metadata['count_faves'] = int(stats.get('favorites', '0'))
-                                photo_metadata['count_comments'] = int(stats.get('comments', '0'))
+                        # Parse engagement metrics from API
+                        stats = photo_info.find('photo/stats')
+                        if stats is not None:
+                            photo_metadata['count_views'] = int(stats.get('views', '0'))
+                            photo_metadata['count_faves'] = int(stats.get('favorites', '0'))
+                            photo_metadata['count_comments'] = int(stats.get('comments', '0'))
 
-                        except Exception as e:
-                            if not self.quiet:
-                                logging.debug(f"Using JSON metrics for {photo_id}: {str(e)}")
+                    except Exception as e:
+                        if not self.quiet:
+                            logging.debug(f"Using JSON metrics for {photo_id}: {str(e)}")
 
-                    # Calculate engagement metrics
-                    faves = int(photo_metadata.get('count_faves', '0'))
-                    comments = int(photo_metadata.get('count_comments', '0'))
-                    views = int(photo_metadata.get('count_views', '0'))
+                # Calculate engagement metrics
+                faves = int(photo_metadata.get('count_faves', '0'))
+                comments = int(photo_metadata.get('count_comments', '0'))
+                views = int(photo_metadata.get('count_views', '0'))
 
-                    pbar.set_postfix_str(
-                        f"{os.path.basename(str(photo_file))} [♥{faves} 💬{comments}]"
+                # Show progress with filename and engagement metrics
+                filename = os.path.basename(str(photo_file))
+                if len(filename) > 30:
+                    filename = filename[:27] + "..."
+                print(f"\rProcessing {i}/{total_files} ({(i/total_files)*100:.1f}%) - {filename} [♥{faves} 💬{comments}]",
+                      end='', flush=True)
+
+                processed += 1
+
+                if (faves >= self.min_faves or
+                    comments >= self.min_comments or
+                    views >= self.min_views):
+
+                    # Calculate interestingness score using weights
+                    interestingness_score = (
+                        (faves * self.fave_weight) +
+                        (comments * self.comment_weight) +
+                        (views * self.view_weight)
                     )
 
-                    processed += 1
+                    photo_data = {
+                        'id': photo_id,
+                        'title': photo_metadata.get('name', ''),
+                        'description': photo_metadata.get('description', ''),
+                        'date_taken': photo_metadata.get('date_taken', ''),
+                        'license': photo_metadata.get('license', ''),
+                        'fave_count': faves,
+                        'comment_count': comments,
+                        'count_views': views,
+                        'interestingness_score': interestingness_score,
+                        'original_file': photo_file,
+                        'original': str(photo_file),
+                        'geo': photo_metadata.get('geo', None),
+                        'tags': photo_metadata.get('tags', []),
+                        'photopage': photo_metadata.get('photopage', ''),
+                        'privacy': photo_metadata.get('privacy', ''),
+                        'safety': photo_metadata.get('safety', '')
+                    }
+                    photos.append(photo_data)
 
-                    if faves > 0 or comments > 0 or views >= 20:
-                        meeting_criteria += 1
-                        interestingness_score = (faves * 10) + (comments * 5) + (views * 0.1)
+            print()  # Final newline
+            print(f"Completed: {processed} photos processed, {meeting_criteria} meet criteria")
 
-                        photo_data = {
-                            'id': photo_id,
-                            'title': photo_metadata.get('name', ''),
-                            'description': photo_metadata.get('description', ''),
-                            'date_taken': photo_metadata.get('date_taken', ''),
-                            'license': photo_metadata.get('license', ''),
-                            'fave_count': faves,
-                            'comment_count': comments,
-                            'count_views': views,
-                            'interestingness_score': interestingness_score,
-                            'original_file': photo_file,
-                            'original': str(photo_file),
-                            'geo': photo_metadata.get('geo', None),
-                            'tags': photo_metadata.get('tags', []),
-                            'photopage': photo_metadata.get('photopage', ''),
-                            'privacy': photo_metadata.get('privacy', ''),
-                            'safety': photo_metadata.get('safety', '')
-                        }
-                        photos.append(photo_data)
-
-                    pbar.update(1)
-
-                # Sort by interestingness score
-                photos.sort(key=lambda x: x['interestingness_score'], reverse=True)
-                return photos[:per_page]
+            # Sort by interestingness score
+            photos.sort(key=lambda x: x['interestingness_score'], reverse=True)
+            return photos[:per_page]
 
         except Exception as e:
             logging.error(f"Error processing photos: {str(e)}")
@@ -1458,6 +1578,14 @@ class FlickrToImmich:
             highlights_dir.mkdir(parents=True, exist_ok=True)
 
             logging.info(f"Processing your photos for engagement metrics...")
+
+            logging.info("Processing photos with custom scoring parameters:")
+            logging.info(f"Favorite weight: {self.fave_weight}")
+            logging.info(f"Comment weight: {self.comment_weight}")
+            logging.info(f"View weight: {self.view_weight}")
+            logging.info(f"Minimum views: {self.min_views}")
+            logging.info(f"Minimum favorites: {self.min_faves}")
+            logging.info(f"Minimum comments: {self.min_comments}")
 
             # Get photos with engagement metrics
             all_photos = self._fetch_user_interesting_photos(time_period, photo_count)
@@ -1481,50 +1609,57 @@ class FlickrToImmich:
             privacy_values_found = {}
 
             # Modified photo processing loop with diagnostic logging
-            with tqdm(all_photos,
-                     desc="Analyzing privacy settings",
-                     unit="photos",
-                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
-                     disable=False) as pbar:
-                for photo in pbar:
-                    # Get raw privacy value and log it
-                    raw_privacy = photo.get('privacy', '')
+            total_photos = len(all_photos)
+            print(f"Analyzing privacy settings for {total_photos} photos...")
 
-                    # Track unique privacy values we find
-                    if raw_privacy not in privacy_values_found:
-                        privacy_values_found[raw_privacy] = 0
-                    privacy_values_found[raw_privacy] += 1
+            for i, photo in enumerate(all_photos, 1):
+                # Get raw privacy value and log it
+                raw_privacy = photo.get('privacy', '')
 
-                    # Normalize privacy value
-                    privacy = raw_privacy.lower().strip()
+                # Track unique privacy values we find
+                if raw_privacy not in privacy_values_found:
+                    privacy_values_found[raw_privacy] = 0
+                privacy_values_found[raw_privacy] += 1
 
-                    # Map privacy values
-                    privacy_mapping = {
-                        'private': 'private',
-                        'friend & family': 'friends & family',   # Add this exact match from your metadata
-                        'friends & family': 'friends & family',
-                        'friends&family': 'friends & family',
-                        'friendandfamily': 'friends & family',
-                        'friend and family': 'friends & family',
-                        'friends and family': 'friends & family',
-                        'friends': 'friends only',
-                        'friend': 'friends only',                # Add singular version
-                        'family': 'family only',
-                        'public': 'public',
-                        '': 'private'  # Default to private if empty
-                    }
+                # Normalize privacy value
+                privacy = raw_privacy.lower().strip()
 
+                # Map privacy values
+                privacy_mapping = {
+                    'private': 'private',
+                    'friend & family': 'friends & family',
+                    'friends & family': 'friends & family',
+                    'friends&family': 'friends & family',
+                    'friendandfamily': 'friends & family',
+                    'friend and family': 'friends & family',
+                    'friends and family': 'friends & family',
+                    'friends': 'friends only',
+                    'friend': 'friends only',
+                    'family': 'family only',
+                    'public': 'public',
+                    '': 'private'
+                }
 
-                    # Get normalized privacy value
-                    normalized_privacy = privacy_mapping.get(privacy, 'private')
+                # Get normalized privacy value
+                normalized_privacy = privacy_mapping.get(privacy, 'private')
 
-                    # Add to appropriate group
-                    if normalized_privacy in privacy_groups:
-                        privacy_groups[normalized_privacy].append(photo)
-                    else:
-                        privacy_groups['private'].append(photo)
+                # Add to appropriate group
+                if normalized_privacy in privacy_groups:
+                    privacy_groups[normalized_privacy].append(photo)
+                else:
+                    privacy_groups['private'].append(photo)
 
-                    pbar.set_postfix({'privacy': normalized_privacy})
+                # Update status
+                print(f"\rProcessing {i}/{total_photos} ({(i/total_photos)*100:.1f}%) - Privacy: {normalized_privacy}",
+                      end='', flush=True)
+
+            # Final newline and summary
+            print("\nAnalysis complete:")
+            for privacy_type, photos in privacy_groups.items():
+                count = len(photos)
+                if count > 0:
+                    percentage = (count / total_photos) * 100
+                    print(f"- {privacy_type}: {count} photos ({percentage:.1f}%)")
 
             # Log what we found
             logging.info("\nRaw privacy values found in metadata:")
@@ -1567,32 +1702,39 @@ class FlickrToImmich:
             logging.info("-" * 30)
 
             # Process each privacy group
-            total_groups = len([group for group in privacy_groups.values() if group])  # Only count non-empty groups
-            with tqdm(total=total_groups,
-                     desc="Processing privacy groups",
-                     unit="groups",
-                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
-                     disable=False) as group_pbar:
-                for privacy, group in privacy_groups.items():
-                    if group:  # Only process groups that have photos
-                        group_pbar.set_postfix({'current': privacy})
+            total_groups = len([g for g in privacy_groups.values() if g])
+            print(f"Processing {total_groups} privacy groups...")
 
-                        # Sort by interestingness score
-                        group.sort(key=lambda x: x.get('interestingness_score', 0), reverse=True)
-                        for i, photo in enumerate(group, 1):
-                            photo['normalized_score'] = i
+            processed_groups = 0
+            for privacy, group in privacy_groups.items():
+                if group:
+                    processed_groups += 1
+                    folder_name = f"0{list(privacy_groups.keys()).index(privacy) + 1}_{privacy.replace(' ', '_').title()}_Highlights"
 
-                        # Create folder name based on privacy setting
-                        folder_name = f"0{list(privacy_groups.keys()).index(privacy) + 1}_{privacy.replace(' ', '_').title()}_Highlights"
+                    print(f"\rProcessing group {processed_groups}/{total_groups} ({(processed_groups/total_groups)*100:.1f}%) - {folder_name}",
+                          end='', flush=True)
 
-                        self._create_single_interesting_album(
-                            highlights_dir,
-                            folder_name,
-                            f"Your most engaging {privacy} Flickr photos",
-                            group
-                        )
+                    # Sort by interestingness score
+                    group.sort(key=lambda x: x.get('interestingness_score', 0), reverse=True)
 
-                        group_pbar.update(1)
+                    # Process photos in group
+                    total_photos = len(group)
+                    for i, photo in enumerate(group, 1):
+                        photo['normalized_score'] = i
+                        print(f"\r  {folder_name}: Processing photo {i}/{total_photos} ({(i/total_photos)*100:.1f}%)",
+                              end='', flush=True)
+
+                    print()  # New line after processing each group's photos
+
+                    self._create_single_interesting_album(
+                        highlights_dir,
+                        folder_name,
+                        f"Your most engaging {privacy} Flickr photos",
+                        group
+                    )
+
+            print("\nGroup processing complete!")
+            print(f"Processed {processed_groups} groups")
 
             logging.info("\nFinished creating highlight folders:")
             for privacy, photos in privacy_groups.items():
@@ -1611,66 +1753,74 @@ class FlickrToImmich:
             album_dir = highlights_dir / folder_name
             album_dir.mkdir(parents=True, exist_ok=True)
 
-            with tqdm(total=len(photos), desc=f"Processing {folder_name}", leave=False) as pbar:
-                for photo in photos:
-                    try:
-                        source_file = photo['original_file']
-                        if not source_file.exists():
-                            self.stats['skipped']['count'] += 1
-                            self.stats['skipped']['details'].append(
-                                (str(source_file), f"photo_{photo['id']}.json", "Source file missing for highlight")
-                            )
-                            pbar.update(1)
-                            continue
+            total_photos = len(photos)
+            print(f"\nProcessing {folder_name}: {total_photos} photos")
+            processed = 0
 
-                        # Create descriptive filename
-                        safe_title = self._sanitize_folder_name(photo['title']) if photo['title'] else photo['id']
-                        photo_filename = f"{safe_title}_{photo['id']}{Path(source_file).suffix}"
-                        dest_file = album_dir / photo_filename
-
-                        # Copy file
-                        shutil.copy2(source_file, dest_file)
-
-                        photo_for_metadata = photo.copy()
-                        photo_for_metadata['original_file'] = str(source_file)
-                        photo_for_metadata['original'] = str(source_file)
-
-                        # Add engagement metrics to metadata
-                        photo_for_metadata['engagement'] = {
-                            'rank': photo['normalized_score'],
-                            'total_ranked': len(photos),
-                            'favorites': photo['fave_count'],
-                            'comments': photo['comment_count']
-                        }
-
-                        # Ensure photopage exists
-                        if 'photopage' not in photo_for_metadata:
-                            photo_for_metadata['photopage'] = f"https://www.flickr.com/photos/{self.account_data.get('nsid', '')}/{photo['id']}"
-
-                        # Embed metadata based on media type
-                        media_type = self.get_media_type(dest_file)
-                        if media_type == MediaType.IMAGE:
-                            self._embed_image_metadata(dest_file, photo_for_metadata)
-                        elif media_type == MediaType.VIDEO:
-                            self._embed_video_metadata(dest_file, photo_for_metadata)
-
-                        if self.write_xmp_sidecars:
-                            self._write_xmp_sidecar(dest_file, photo_for_metadata)
-
-                        self.stats['successful']['count'] += 1
-                        pbar.update(1)
-
-                    except Exception as e:
-                        error_msg = f"Error processing highlight photo {photo['id']}: {str(e)}"
-                        self.stats['failed']['count'] += 1
-                        self.stats['failed']['details'].append(
-                            (str(photo.get('original_file', f"unknown_{photo['id']}")),
-                            f"photo_{photo['id']}.json",
-                            error_msg)
+            for i, photo in enumerate(photos, 1):
+                try:
+                    source_file = photo['original_file']
+                    if not source_file.exists():
+                        self.stats['skipped']['count'] += 1
+                        self.stats['skipped']['details'].append(
+                            (str(source_file), f"photo_{photo['id']}.json", "Source file missing for highlight")
                         )
-                        logging.error(error_msg)
-                        pbar.update(1)
                         continue
+
+                    # Create descriptive filename
+                    safe_title = self._sanitize_folder_name(photo['title']) if photo['title'] else photo['id']
+                    photo_filename = f"{safe_title}_{photo['id']}{Path(source_file).suffix}"
+                    dest_file = album_dir / photo_filename
+
+                    # Show current progress
+                    print(f"\r{folder_name}: {i}/{total_photos} ({(i/total_photos)*100:.1f}%) - {photo_filename}",
+                          end='', flush=True)
+
+                    # Copy file
+                    shutil.copy2(source_file, dest_file)
+
+                    photo_for_metadata = photo.copy()
+                    photo_for_metadata['original_file'] = str(source_file)
+                    photo_for_metadata['original'] = str(source_file)
+
+                    # Add engagement metrics to metadata
+                    photo_for_metadata['engagement'] = {
+                        'rank': photo['normalized_score'],
+                        'total_ranked': len(photos),
+                        'favorites': photo['fave_count'],
+                        'comments': photo['comment_count']
+                    }
+
+                    # Ensure photopage exists
+                    if 'photopage' not in photo_for_metadata:
+                        photo_for_metadata['photopage'] = f"https://www.flickr.com/photos/{self.account_data.get('nsid', '')}/{photo['id']}"
+
+                    # Embed metadata based on media type
+                    media_type = self.get_media_type(dest_file)
+                    if media_type == MediaType.IMAGE:
+                        self._embed_image_metadata(dest_file, photo_for_metadata)
+                    elif media_type == MediaType.VIDEO:
+                        self._embed_video_metadata(dest_file, photo_for_metadata)
+
+                    if self.write_xmp_sidecars:
+                        self._write_xmp_sidecar(dest_file, photo_for_metadata)
+
+                    self.stats['successful']['count'] += 1
+                    processed += 1
+
+                except Exception as e:
+                    error_msg = f"Error processing highlight photo {photo['id']}: {str(e)}"
+                    self.stats['failed']['count'] += 1
+                    self.stats['failed']['details'].append(
+                        (str(photo.get('original_file', f"unknown_{photo['id']}")),
+                        f"photo_{photo['id']}.json",
+                        error_msg)
+                    )
+                    logging.error(error_msg)
+                    continue
+
+            print()  # Final newline
+            print(f"Completed {folder_name}: {processed}/{total_photos} photos processed successfully")
 
             logging.info(f"\nCompleted processing {folder_name}: {len(photos)} photos")
 
@@ -1881,55 +2031,62 @@ class FlickrToImmich:
         max_workers = min(os.cpu_count() * 2, 8)  # Use up to 8 threads
 
         # Process photos in parallel
-        with tqdm(total=len(photos_to_process),
-                desc="Processing photos",
-                leave=True,
-                bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]',
-                disable=None
-        ) as pbar:
+        total_photos = len(photos_to_process)
+        processed = 0
+        print(f"\nProcessing {total_photos} photos...")
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                if organization == 'by_date':
-                    future_to_photo = {
-                        executor.submit(self._process_single_photo_by_date, photo_id, date_format): photo_id
-                        for photo_id, _ in photos_to_process
-                    }
-                else:
-                    future_to_photo = {
-                        executor.submit(self._process_single_photo_wrapper, item): item[0]
-                        for item in photos_to_process
-                    }
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            if organization == 'by_date':
+                future_to_photo = {
+                    executor.submit(self._process_single_photo_by_date, photo_id, date_format): photo_id
+                    for photo_id, _ in photos_to_process
+                }
+            else:
+                future_to_photo = {
+                    executor.submit(self._process_single_photo_wrapper, item): item[0]
+                    for item in photos_to_process
+                }
 
-                for future in concurrent.futures.as_completed(future_to_photo):
-                    photo_id = future_to_photo[future]
-                    try:
-                        result = future.result()
-                        if isinstance(result, tuple):
-                            if len(result) == 3:  # Success case
-                                success, photo_id, filename = result
-                                if success:
-                                    self.stats['successful']['count'] += 1
-                                # Update progress bar with actual filename
-                                pbar.set_postfix_str(f"File: {os.path.basename(filename)}")
-                            else:  # Error case
-                                _, photo_id, filename, error = result
-                                self.stats['failed']['count'] += 1
-                                self.stats['failed']['details'].append(
-                                    (filename, f"photo_{photo_id}.json", error)
-                                )
-                                pbar.set_postfix_str(f"File: {os.path.basename(filename)} (failed)")
-                        elif isinstance(result, bool):  # Result from _process_single_photo_by_date
-                            if result:
+            for future in concurrent.futures.as_completed(future_to_photo):
+                processed += 1
+                photo_id = future_to_photo[future]
+                try:
+                    result = future.result()
+                    if isinstance(result, tuple):
+                        if len(result) == 3:  # Success case
+                            success, photo_id, filename = result
+                            if success:
                                 self.stats['successful']['count'] += 1
-                    except Exception as e:
-                        self.stats['failed']['count'] += 1
-                        self.stats['failed']['details'].append(
-                            (f"unknown_{photo_id}", f"photo_{photo_id}.json", str(e))
-                        )
-                        pbar.set_postfix_str(f"File: unknown_{photo_id} (error)")
-                        logging.error(f"Error processing {photo_id}: {str(e)}")
-                    finally:
-                        pbar.update(1)
+                                status = f"Processing: {os.path.basename(filename)}"
+                        else:  # Error case
+                            _, photo_id, filename, error = result
+                            self.stats['failed']['count'] += 1
+                            self.stats['failed']['details'].append(
+                                (filename, f"photo_{photo_id}.json", error)
+                            )
+                            status = f"Failed: {os.path.basename(filename)}"
+                    elif isinstance(result, bool):  # Result from _process_single_photo_by_date
+                        if result:
+                            self.stats['successful']['count'] += 1
+                            status = f"Completed: {photo_id}"
+                        else:
+                            status = f"Failed: {photo_id}"
+                except Exception as e:
+                    self.stats['failed']['count'] += 1
+                    self.stats['failed']['details'].append(
+                        (f"unknown_{photo_id}", f"photo_{photo_id}.json", str(e))
+                    )
+                    status = f"Error: {photo_id}"
+                    logging.error(f"Error processing {photo_id}: {str(e)}")
+
+                # Update progress
+                print(f"\r{processed}/{total_photos} ({(processed/total_photos)*100:.1f}%) - {status}",
+                      end='', flush=True)
+
+        print()  # Final newline
+        print(f"Completed processing {processed} photos")
+        print(f"Successful: {self.stats['successful']['count']}")
+        print(f"Failed: {self.stats['failed']['count']}")
 
     def process_photos_hybrid(self, date_format: str):
         """Process all photos using hybrid organization method"""
@@ -1944,35 +2101,43 @@ class FlickrToImmich:
         max_workers = min(os.cpu_count() * 2, 8)  # Use up to 8 threads
 
         # Process photos in parallel
-        with tqdm(total=len(photos_to_process),
-                  desc="Processing photos (Hybrid)",
-                  leave=True,
-                  bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]',
-                  disable=None
-        ) as pbar:
+        total_photos = len(photos_to_process)
+        processed = 0
+        print(f"\nProcessing {total_photos} photos (Hybrid mode)...")
+        print("Starting...", flush=True)
 
-            pbar.set_postfix_str("Starting...")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_photo = {
-                    executor.submit(self._process_single_photo_hybrid, photo_id, albums): photo_id
-                    for photo_id, albums in photos_to_process
-                }
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_photo = {
+                executor.submit(self._process_single_photo_hybrid, photo_id, albums): photo_id
+                for photo_id, albums in photos_to_process
+            }
 
-                for future in concurrent.futures.as_completed(future_to_photo):
-                    photo_id = future_to_photo[future]
-                    try:
-                        result = future.result()
-                        if result:
-                            self.stats['successful']['count'] += 1
-                        pbar.set_postfix_str(f"Processing {photo_id}")
-                    except Exception as e:
-                        self.stats['failed']['count'] += 1
-                        self.stats['failed']['details'].append(
-                            (f"photo_{photo_id}", str(e))
-                        )
-                        logging.error(f"Error processing {photo_id}: {str(e)}")
-                    finally:
-                        pbar.update(1)
+            for future in concurrent.futures.as_completed(future_to_photo):
+                processed += 1
+                photo_id = future_to_photo[future]
+                try:
+                    result = future.result()
+                    if result:
+                        self.stats['successful']['count'] += 1
+                        status = f"Processing: {photo_id}"
+                    else:
+                        status = f"Skipped: {photo_id}"
+                except Exception as e:
+                    self.stats['failed']['count'] += 1
+                    self.stats['failed']['details'].append(
+                        (f"photo_{photo_id}", str(e))
+                    )
+                    status = f"Error: {photo_id}"
+                    logging.error(f"Error processing {photo_id}: {str(e)}")
+
+                # Update progress
+                print(f"\r{processed}/{total_photos} ({(processed/total_photos)*100:.1f}%) - {status}",
+                      end='', flush=True)
+
+        print()  # Final newline
+        print(f"Completed processing {processed} photos")
+        print(f"Successful: {self.stats['successful']['count']}")
+        print(f"Failed: {self.stats['failed']['count']}")
 
     def _process_single_photo_hybrid(self, photo_id: str, albums: List[str]) -> bool:
         """Process a single photo for hybrid organization (by date and album)"""
@@ -2323,29 +2488,40 @@ class FlickrToImmich:
         try:
             photos_to_process = list(self.photo_to_albums.keys())
 
-            with tqdm(total=len(photos_to_process),
-                     desc="Processing photos by date",
-                     unit="photos",
-                     disable=None
-            ) as pbar:
+            # Process photos in parallel
+            total_photos = len(photos_to_process)
+            processed = 0
+            print(f"\nProcessing {total_photos} photos by date...")
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(os.cpu_count() * 2, 8)) as executor:
-                    future_to_photo = {
-                        executor.submit(self._process_single_photo_by_date, photo_id, date_format): photo_id
-                        for photo_id in photos_to_process
-                    }
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(os.cpu_count() * 2, 8)) as executor:
+                future_to_photo = {
+                    executor.submit(self._process_single_photo_by_date, photo_id, date_format): photo_id
+                    for photo_id in photos_to_process
+                }
 
-                    for future in concurrent.futures.as_completed(future_to_photo):
-                        photo_id = future_to_photo[future]
-                        try:
-                            success = future.result()
-                            if success:
-                                self.stats['successful']['count'] += 1
-                            pbar.update(1)
-                        except Exception as e:
-                            logging.error(f"Error processing photo {photo_id}: {str(e)}")
-                            self.stats['failed']['count'] += 1
-                            pbar.update(1)
+                for future in concurrent.futures.as_completed(future_to_photo):
+                    processed += 1
+                    photo_id = future_to_photo[future]
+                    try:
+                        success = future.result()
+                        if success:
+                            self.stats['successful']['count'] += 1
+                            status = f"Completed: {photo_id}"
+                        else:
+                            status = f"Failed: {photo_id}"
+                    except Exception as e:
+                        logging.error(f"Error processing photo {photo_id}: {str(e)}")
+                        self.stats['failed']['count'] += 1
+                        status = f"Error: {photo_id}"
+
+                    # Update progress
+                    print(f"\r{processed}/{total_photos} ({(processed/total_photos)*100:.1f}%) - {status}",
+                          end='', flush=True)
+
+            print()  # Final newline
+            print(f"Completed processing {processed} photos")
+            print(f"Successful: {self.stats['successful']['count']}")
+            print(f"Failed: {self.stats['failed']['count']}")
 
         except Exception as e:
             logging.error(f"Error in date-based processing: {str(e)}")
@@ -3140,73 +3316,317 @@ class FlickrToImmich:
             # Restore original handlers
             logging.getLogger().handlers = original_handlers
 
+def gui_main():
+    """Entry point for GUI version"""
+    try:
+        if '--cli' in sys.argv:
+            sys.argv.remove('--cli')
+
+        # Create wx.App instance before using wx
+        app = wx.App(False)
+
+        # Run with Gooey
+        Gooey(
+            program_name="Flickr to Any Tool",
+            default_size=(1000, 800),
+            minimum_size=(800, 600),
+            resizable=True,
+            navigation='TABBED',
+            sidebar_title='Steps',
+            terminal_font_family='Courier New',
+            terminal_font_size=8,
+            show_restart_button=False,
+            tabbed_groups=True,
+            progress_regex=r"(\d+)%",
+            progress_expr="min(100, int(float({\1})))",
+            hide_progress_msg=False,
+            console_height=200,
+            show_failure_modal=True,
+            group_by_type=True,
+            scrollable=True,
+            fullscreen=False,
+            header_height=80,
+            header_show_title=True,
+            header_bg_color='#3c3f41',
+            terminal_panel_color='#F0F0F0',
+            show_success_modal=False
+        )(main)()
+
+    except Exception as e:
+        error_msg = f"Error in gui_main: {str(e)}\n"
+        error_msg += "Traceback:\n"
+        import traceback
+        error_msg += traceback.format_exc()
+        print(error_msg)
+        logging.error(error_msg)
+        raise
+
 def main():
-    # Configuration
-    parser = argparse.ArgumentParser(description='Convert Flickr export to Immich-compatible format')
+    import sys
+    import argparse
+    from gooey import GooeyParser
 
-    # Add zip preprocessing arguments
-    parser.add_argument('--zip-preprocessing', action='store_true',
-                       help='Enable preprocessing of Flickr export zip files')
-    parser.add_argument('--source-dir', help='Directory containing Flickr export zip files (required if --zip-preprocessing is set)')
+    parser = GooeyParser(description='Flickr to Any Tool')
 
-    # Existing arguments
-    parser.add_argument('--metadata-dir', required=True, help='Directory containing Flickr JSON metadata files')
-    parser.add_argument('--photos-dir', required=True, help='Directory containing the photos/videos')
-    parser.add_argument('--output-dir', required=True, help='Directory where album structure will be created')
-    parser.add_argument('--log-file', default='flickr_to_immich.log', help='Log file location (default: flickr_to_immich.log)')
-    parser.add_argument('--results-dir', help='Directory to store the processing results log (default: same as output directory)')
-    parser.add_argument('--no-extended-description', action='store_true', help='Only include original description, skip additional metadata')
-    parser.add_argument('--no-xmp-sidecars', action='store_true', help='Skip writing XMP sidecar files')
-    parser.add_argument('--export-block-if-failure', action='store_true',
-                       help='Block file export if metadata processing fails (default: export files even if metadata fails)')
-    parser.add_argument('--resume', action='store_true', help='Resume previous run - skip existing files')
-    parser.add_argument('--quiet', action='store_true',
-                       help='Reduce console output (errors will still be logged to file)')
+    # Create groups
+    preprocessing = parser.add_argument_group(
+        'Step 1: Preprocessing',
+        'Extract Flickr export zip files',
+        gooey_options={'show_border': True}
+    )
 
-    # Export type flags
-    export_type = parser.add_mutually_exclusive_group()
-    export_type.add_argument('--export-interesting-only', action='store_true',
-                           help='Only export the highlights/interesting photos')
-    export_type.add_argument('--export-standard-only', action='store_true',
-                           help='Only export the standard library (by album or by date)')
+    # Add other non-directory arguments to preprocessing
+    preprocessing.add_argument(
+        '--zip-preprocessing',
+        metavar='Enable ZIP Preprocessing',
+        action='store_true',
+        help='Enable if you need to extract Flickr export zip files first',
+        default=True,
+        gooey_options={'checkbox_label': 'Process ZIP files'}
+    )
+
+    main_settings = parser.add_argument_group(
+        'Step 2: Main Settings',
+        'Configure main conversion options',
+        gooey_options={'show_border': True}
+    )
+    # Setup directory widgets
+    preprocessing, main_settings = setup_directory_widgets(preprocessing, main_settings)
+
+    # Create export type group
+    export_type = parser.add_argument_group(
+        'Step 3: Export Type',
+        'Choose what to export',
+        gooey_options={'show_border': True}
+    )
+
+    # Main settings non-directory arguments
+    export_type.add_argument(
+        '--organization',
+        metavar='Organization Method',
+        choices=['by_album', 'by_date', 'hybrid'],
+        default='by_date',
+        help='How to organize photos in the library'
+    )
+    export_type.add_argument(
+        '--date-format',
+        metavar='Date Format',
+        choices=['yyyy', 'yyyy-mm', 'yyyy/yyyy-mm-dd', 'yyyy/yyyy-mm', 'yyyy-mm-dd'],
+        default='yyyy/yyyy-mm',
+        help='Date format for folder structure'
+    )
+
+    export_type.add_argument(
+        '--export-mode',
+        metavar='What to Export',
+        choices=[
+            'Full library and Highlights',
+            'Full library only',
+            'Highlights only'
+        ],
+        default='Full library and Highlights',
+        help='Choose what to export from your Flickr library',
+        gooey_options={
+            'label': 'Export Mode'
+        }
+    )
 
     # Interesting photos configuration
-    parser.add_argument('--interesting-period', choices=['all-time', 'byyear'],
-                       help='Time period for interesting photos: all-time or byyear')
-    parser.add_argument('--interesting-count', type=int, default=100,
-                       help='Number of interesting photos to fetch (max 500)')
+    export_type.add_argument(
+        '--interesting-period',
+        metavar='Interesting Time Period',
+        choices=['all-time', 'byyear'],
+        default='all-time',
+        help='Time period for interesting photos'
+    )
+    export_type.add_argument(
+        '--interesting-count',
+        metavar='Number of Photos',
+        type=int,
+        default=100,
+        help='Number of interesting photos to fetch (max 500)'
+    )
 
-    # Organization configuration
-    parser.add_argument('--organization', choices=['by_album', 'by_date', 'hybrid'], default='hybrid',
-                       help='How to organize photos in the library: by_album, by_date, or hybrid - by date and album')
-    parser.add_argument('--date-format', choices=['yyyy', 'yyyy-mm', 'yyyy/yyyy-mm-dd', 'yyyy/yyyy-mm', 'yyyy-mm-dd'],
-                       default='yyyy/yyyy-mm',
-                       help='Date format for folder structure when using by_date organization')
+    # Add highlight weighting settings
+    export_type.add_argument(
+        '--fave-weight',
+        metavar='Favorite Weight',
+        type=float,
+        default=2,
+        help='Weight multiplier for favorites (default: 10.0)',
+        gooey_options={
+            'label': 'Favorite Weight'
+        }
+    )
 
-    parser.add_argument('--use-api', action='store_true',
-                       help='Use Flickr API to fetch additional metadata (privacy, albums, etc.)')
+    export_type.add_argument(
+        '--comment-weight',
+        metavar='Comment Weight',
+        type=float,
+        default=1,
+        help='Weight multiplier for comments (default: 5.0)',
+        gooey_options={
+            'label': 'Comment Weight'
+        }
+    )
 
-    api_key = os.environ.get('FLICKR_API_KEY')
+    export_type.add_argument(
+        '--view-weight',
+        metavar='View Weight',
+        type=float,
+        default=2,
+        help='Weight multiplier for views (default: 0.1)',
+        gooey_options={
+            'label': 'View Weight'
+        }
+    )
+
+    # Add minimum threshold settings
+    export_type.add_argument(
+        '--min-views',
+        metavar='Minimum Views',
+        type=int,
+        default=20,
+        help='Minimum views required (default: 20)',
+        gooey_options={
+            'label': 'Minimum Views'
+        }
+    )
+
+    export_type.add_argument(
+        '--min-faves',
+        metavar='Minimum Favorites',
+        type=int,
+        default=1,
+        help='Minimum favorites required (default: 0)',
+        gooey_options={
+            'label': 'Minimum Favorites'
+        }
+    )
+
+    export_type.add_argument(
+        '--min-comments',
+        metavar='Minimum Comments',
+        type=int,
+        default=1,
+        help='Minimum comments required (default: 0)',
+        gooey_options={
+            'label': 'Minimum Comments'
+        }
+    )
+
+    # Advanced options
+    advanced = parser.add_argument_group(
+        'Step 4: Advanced Options',
+        'Configure additional settings',
+        gooey_options={'show_border': True}
+    )
+
+    advanced.add_argument(
+        '--no-extended-description',
+        metavar='Skip Extended Description',
+        action='store_true',
+        help='Only include original description',
+        gooey_options={'checkbox_label': 'Skip extended description'}
+    )
+    advanced.add_argument(
+        '--no-xmp-sidecars',
+        metavar='Skip XMP Files',
+        action='store_true',
+        help='Skip writing XMP sidecar files',
+        gooey_options={'checkbox_label': 'Skip XMP sidecar files'}
+    )
+    advanced.add_argument(
+        '--export-block-if-failure',
+        metavar='Block on Failure',
+        action='store_true',
+        help='Stop if metadata processing fails',
+        gooey_options={'checkbox_label': 'Stop on metadata failure'}
+    )
+    advanced.add_argument(
+        '--resume',
+        metavar='Resume Previous',
+        action='store_true',
+        help='Skip existing files',
+        gooey_options={'checkbox_label': 'Resume previous run'}
+    )
+    advanced.add_argument(
+        '--quiet',
+        metavar='Quiet Mode',
+        action='store_true',
+        default=True,
+        help='Reduce console output',
+        gooey_options={'checkbox_label': 'Quiet mode'}
+    )
+    advanced.add_argument(
+        '--use-api',
+        metavar='Use Flickr API',
+        action='store_true',
+        default=True,
+        help='Use Flickr API for additional metadata',
+        gooey_options={
+            'checkbox_label': 'Use Flickr API'
+        }
+    )
+    advanced.add_argument(
+        '--api-key',
+        metavar='Flickr API Key',
+        help='Enter your Flickr API key',
+        default='',
+        gooey_options={
+            'visible_when': {
+                'use-api': True  # Only show when use-api is checked
+            }
+        }
+    )
+
+    # Parse arguments
     args = parser.parse_args()
 
+    # Then validate directories
+    required_dirs = {
+        'Metadata Directory': args.metadata_dir,
+        'Photos Directory': args.photos_dir,
+        'Output Directory': args.output_dir
+    }
+
+    missing_dirs = [name for name, path in required_dirs.items()
+                    if path and not os.path.exists(os.path.dirname(path))]
+
+    if missing_dirs:
+        error_msg = f"Please set the following directories: {', '.join(missing_dirs)}"
+        logging.error(error_msg)
+        return args
+
+    # Get the script's directory
+    script_dir = Path(__file__).parent
+    log_file = script_dir / 'flickr_to_immich.log'
+
+    # Remove any existing handlers
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+
+    # Create handlers
+    file_handler = logging.FileHandler(log_file)  # Changed from args.log_file to log_file
+    console_handler = logging.StreamHandler(sys.stdout)
+
+    # Create formatter
+    formatter = logging.Formatter('%(message)s')
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # Add handlers to root logger
+    logging.root.addHandler(file_handler)
+    logging.root.addHandler(console_handler)
+
+    # Set log level
+    logging.root.setLevel(logging.INFO)
+
+    logging.info("Logging initialized")
+
     try:
-        # Set up logging first
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(args.log_file),
-                logging.StreamHandler()
-            ]
-        )
-
-        # Validate arguments for zip preprocessing
-        if args.zip_preprocessing:
-            if not args.source_dir:
-                parser.error("--source-dir is required when --zip-preprocessing is enabled")
-
-            # Process the zip files
-            logging.info(f"Starting preprocessing of Flickr export files from {args.source_dir}")
+        # Handle preprocessing first
+        if args.zip_preprocessing and args.source_dir:
             preprocessor = FlickrPreprocessor(
                 source_dir=args.source_dir,
                 metadata_dir=args.metadata_dir,
@@ -3214,74 +3634,105 @@ def main():
                 quiet=args.quiet
             )
             preprocessor.process_exports()
-            logging.info("Preprocessing complete")
 
-        # Initialize converter
+        # Handle API key
+        if args.use_api:
+            if args.api_key:
+                api_key = args.api_key
+                os.environ['FLICKR_API_KEY'] = args.api_key
+            else:
+                api_key = os.environ.get('FLICKR_API_KEY')
+            if not api_key:
+                logging.warning("Flickr API enabled but no API key provided in GUI or environment")
+        else:
+            api_key = None
+
+        # Create converter instance
         converter = FlickrToImmich(
             metadata_dir=args.metadata_dir,
             photos_dir=args.photos_dir,
             output_dir=args.output_dir,
-            date_format=args.date_format,  # Explicitly pass the date format
-            log_file=args.log_file,
-            results_dir=args.results_dir,
+            date_format=args.date_format,
             api_key=api_key,
+            log_file=str(log_file),
+            results_dir=args.results_dir,
             include_extended_description=not args.no_extended_description,
             write_xmp_sidecars=not args.no_xmp_sidecars,
             block_if_failure=args.export_block_if_failure,
             resume=args.resume,
+            use_api=args.use_api,
             quiet=args.quiet
         )
 
-        # Determine what to export based on flags
-        export_standard = not args.export_interesting_only  # Export standard unless interesting-only flag is set
-        export_interesting = (not args.export_standard_only and args.interesting_period)  # Export interesting if period is set and not standard-only
+        # Process based on export mode
+        if args.export_mode == 'Full library and Highlights':
+            logging.info("Processing both full library and highlights...")
 
-        # Create standard export (by_album or by_date) if needed
-        if export_standard:
-            logging.info("Creating standard library structure...")
-            if args.organization == 'by_album':
-                converter.create_album_structure()
-            elif args.organization == 'by_date':
-                converter.create_date_structure(args.date_format)
-            elif args.organization == 'hybrid':
-                # For hybrid, we'll create both structures but use a different processing method
-                converter.create_date_structure(args.date_format)
-                converter.create_album_structure()
-
-            # Process all media files
-            logging.info("Processing media files for standard export...")
-            if args.organization == 'hybrid':
-                converter.process_photos_hybrid(args.date_format)
-            else:
-                converter.process_photos(args.organization, args.date_format)
-
-        # Create interesting/highlights export if needed
-        if export_interesting:
-            logging.info(f"Creating album(s) of interesting photos for {args.interesting_period}...")
+            # Process highlights
+            logging.info("Step 1: Creating interesting albums...")
             converter.create_interesting_albums(
                 args.interesting_period,
                 args.interesting_count
             )
 
-        # Print statistics
-        converter.print_statistics()
-
-        # Write detailed results log
-        converter.write_results_log()
-
-        # Print summary of what was exported
-        logging.info("\nExport Summary:")
-        if export_standard:
+            # Process library
+            logging.info("Step 2: Creating album structure...")
             if args.organization == 'by_album':
-                logging.info(f"- Standard export (by album): {args.output_dir}/full_library_export/by_album")
+                converter.create_album_structure()
+            elif args.organization == 'by_date':
+                converter.create_date_structure(args.date_format)
+            elif args.organization == 'hybrid':
+                converter.create_date_structure(args.date_format)
+                converter.create_album_structure()
+
+            logging.info("Step 4: Processing photos...")
+            if args.organization == 'hybrid':
+                converter.process_photos_hybrid(args.date_format)
             else:
-                logging.info(f"- Standard export (by date): {args.output_dir}/full_library_export/by_date")
-        if export_interesting:
-            logging.info(f"- Highlights export: {args.output_dir}/highlights_only")
+                converter.process_photos(args.organization, args.date_format)
+
+        elif args.export_mode == 'Full library only':
+            logging.info("Processing full library only...")
+            if args.organization == 'by_album':
+                converter.create_album_structure()
+            elif args.organization == 'by_date':
+                converter.create_date_structure(args.date_format)
+            elif args.organization == 'hybrid':
+                converter.create_date_structure(args.date_format)
+                converter.create_album_structure()
+
+            if args.organization == 'hybrid':
+                converter.process_photos_hybrid(args.date_format)
+            else:
+                converter.process_photos(args.organization, args.date_format)
+
+        elif args.export_mode == 'Highlights only':
+            logging.info("Processing highlights only...")
+            converter.create_interesting_albums(
+                args.interesting_period,
+                args.interesting_count
+            )
+
+        # Print final statistics
+        converter.print_statistics()
+        converter.write_results_log()
 
     except Exception as e:
         logging.error(f"Fatal error: {str(e)}")
+        sys.stdout.flush()
         raise
 
-if __name__ == "__main__":
-    main()
+    return args
+
+if __name__ == '__main__':
+    print("Starting program...")
+    print(f"CLI mode: {is_cli_mode()}")
+    print(f"Arguments: {sys.argv}")
+
+    if is_cli_mode():
+        print("Entering CLI mode")
+        sys.argv.remove('--cli')  # Remove CLI flag
+        main()  # Run without Gooey
+    else:
+        print("Entering GUI mode")
+        gui_main()  # Use the new gui_main function

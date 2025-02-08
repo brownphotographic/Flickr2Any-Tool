@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flickr-to-anytool"
+version = "1.0.0"
+description = "A tool to process Flickr exports"
+readme = "README.md"
+requires-python = ">=3.6"
+authors = [{ name = "Rob Brown", email = "your.email@example.com" }]
+dependencies = ["flickrapi", "Pillow", "tqdm", "wxPython", "Gooey", "tomlkit"]
+
+[project.scripts]
+flickr-to-any = "flickr_to_anytool.flickr_to_any:gui_main"
+
+[project.urls]
+Homepage = "https://github.com/brownphotographic/Flickr2Any-Tool"
