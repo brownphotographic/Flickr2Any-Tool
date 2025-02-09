@@ -182,10 +182,6 @@ flickr-to-any-cli --export-interesting-only --interesting-period all-time --inte
 - No duplicates
 - Album information preserved in metadata
 
-### 3. Hybrid (`--organization hybrid`)
-- Date-based folders with album subfolders
-- Best of both worlds but may create duplicates
-
 ## Highlights Feature
 
 Creates curated collections of your most engaging photos:

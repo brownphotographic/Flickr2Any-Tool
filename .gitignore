@@ -3,3 +3,5 @@
 flickr_to_immich.log
 flickr_to_immich.log
 /flickr_to_anytool.egg-info
+/build
+build/lib/flickr_to_anytool/flickr_to_any.py

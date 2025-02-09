@@ -51,11 +51,19 @@ import sys
 import traceback
 from tqdm import tqdm
 import time
+import psutil
+import gc
 
 
 # Configure environment for progress bars
 os.environ['TQDM_DISABLE'] = 'false'
 os.environ['PYTHONIOENCODING'] = 'utf-8'
+
+def log_memory_usage():
+    """Log current memory usage"""
+    process = psutil.Process()
+    memory = process.memory_info()
+    logging.info(f"Memory usage: {memory.rss / (1024 * 1024):.1f} MB")
 
 def is_cli_mode():
     return '--cli' in sys.argv
@@ -616,18 +624,28 @@ class FlickrToImmich:
             original_name = photo_json['name'].strip()
             # Ensure name isn't empty after stripping
             if not original_name:
-                original_name = f"photo_{photo_id}"
+                original_name = source_file.name
         else:
-            original_name = f"photo_{photo_id}"
+            # Use the original filename without the ID
+            original_name = source_file.name
 
-        # Always ensure photo_id is in the filename if it isn't already
-        if photo_id not in original_name:
-            original_name = f"{original_name}_{photo_id}"
+        # Clean up the name by removing the Flickr ID if present
+        # Common patterns: name_123456789.jpg or name_123456789_o.jpg
+        name_parts = original_name.rsplit('_', 2)  # Split from right, max 2 splits
+        if len(name_parts) > 1:
+            # Check if the second-to-last part is a number (Flickr ID)
+            if name_parts[-2].isdigit():
+                # Remove the ID part
+                if len(name_parts) == 3 and name_parts[-1].lower() == 'o':
+                    # Case: name_123456789_o.jpg
+                    original_name = name_parts[0] + source_file.suffix
+                else:
+                    # Case: name_123456789.jpg
+                    original_name = name_parts[0] + source_file.suffix
 
-        # Add extension if needed
-        source_extension = source_file.suffix.lower()
-        if not original_name.lower().endswith(source_extension):
-            original_name = f"{original_name}{source_extension}"
+        # Ensure extension is present
+        if not original_name.lower().endswith(source_file.suffix.lower()):
+            original_name = f"{original_name}{source_file.suffix}"
 
         # Sanitize the filename
         original_name = self._sanitize_filename(original_name)
@@ -939,7 +957,10 @@ class FlickrToImmich:
                     view_weight: float = 5.0,
                     min_views: int = 10,
                     min_faves: int = 2,
-                    min_comments: int = 0):
+                    min_comments: int = 0,
+                    max_memory: float = 4.0,
+                    cpu_cores: int = 4,
+                    chunk_size: int = 100):
 
 
             # First, set all parameters as instance attributes
@@ -948,6 +969,9 @@ class FlickrToImmich:
             self.date_format = date_format  # Now this will always have a value
             self.quiet = quiet
             self.use_api = use_api
+            self.max_memory = max_memory * 1024 * 1024 * 1024  # Convert GB to bytes
+            self.cpu_cores = cpu_cores
+            self.chunk_size = chunk_size
 
 
             # Track processing statistics
@@ -2015,263 +2039,100 @@ class FlickrToImmich:
         return sanitized.strip('_')
 
     def process_photos(self, organization: str, date_format: str = None):
-        """Process all photos: both album photos and unorganized photos"""
-        # First, get total count of all photos to process
+        """Process all photos with resource control and memory management"""
         total_photos = len(self.photo_to_albums)
         self.stats['total_files'] = total_photos
-
-        # Create a list of all photos to process
-        photos_to_process = []
-
-        # Add all photos from albums
-        for photo_id, albums in self.photo_to_albums.items():
-            photos_to_process.append((photo_id, albums))
-
-        # Calculate number of worker threads
-        max_workers = min(os.cpu_count() * 2, 8)  # Use up to 8 threads
-
-        # Process photos in parallel
-        total_photos = len(photos_to_process)
         processed = 0
+
+        # Use print and logging for GUI visibility
         print(f"\nProcessing {total_photos} photos...")
+        logging.info(f"Processing {total_photos} photos...")
+        print(f"Using {self.cpu_cores} CPU cores")
+        print(f"Maximum memory: {self.max_memory / (1024*1024*1024):.1f} GB")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            if organization == 'by_date':
-                future_to_photo = {
-                    executor.submit(self._process_single_photo_by_date, photo_id, date_format): photo_id
-                    for photo_id, _ in photos_to_process
-                }
-            else:
-                future_to_photo = {
-                    executor.submit(self._process_single_photo_wrapper, item): item[0]
-                    for item in photos_to_process
-                }
+        # Initial memory check
+        log_memory_usage()
 
-            for future in concurrent.futures.as_completed(future_to_photo):
-                processed += 1
-                photo_id = future_to_photo[future]
-                try:
-                    result = future.result()
-                    if isinstance(result, tuple):
-                        if len(result) == 3:  # Success case
-                            success, photo_id, filename = result
-                            if success:
-                                self.stats['successful']['count'] += 1
-                                status = f"Processing: {os.path.basename(filename)}"
-                        else:  # Error case
-                            _, photo_id, filename, error = result
-                            self.stats['failed']['count'] += 1
-                            self.stats['failed']['details'].append(
-                                (filename, f"photo_{photo_id}.json", error)
-                            )
-                            status = f"Failed: {os.path.basename(filename)}"
-                    elif isinstance(result, bool):  # Result from _process_single_photo_by_date
-                        if result:
-                            self.stats['successful']['count'] += 1
-                            status = f"Completed: {photo_id}"
-                        else:
-                            status = f"Failed: {photo_id}"
-                except Exception as e:
-                    self.stats['failed']['count'] += 1
-                    self.stats['failed']['details'].append(
-                        (f"unknown_{photo_id}", f"photo_{photo_id}.json", str(e))
-                    )
-                    status = f"Error: {photo_id}"
-                    logging.error(f"Error processing {photo_id}: {str(e)}")
-
-                # Update progress
-                print(f"\r{processed}/{total_photos} ({(processed/total_photos)*100:.1f}%) - {status}",
-                      end='', flush=True)
-
-        print()  # Final newline
-        print(f"Completed processing {processed} photos")
-        print(f"Successful: {self.stats['successful']['count']}")
-        print(f"Failed: {self.stats['failed']['count']}")
-
-    def process_photos_hybrid(self, date_format: str):
-        """Process all photos using hybrid organization method"""
-        # First, get total count of all photos to process
-        total_photos = len(self.photo_to_albums)
-        self.stats['total_files'] = total_photos
-
-        # Create a list of all photos to process
-        photos_to_process = list(self.photo_to_albums.items())
-
-        # Calculate number of worker threads
-        max_workers = min(os.cpu_count() * 2, 8)  # Use up to 8 threads
-
-        # Process photos in parallel
-        total_photos = len(photos_to_process)
-        processed = 0
-        print(f"\nProcessing {total_photos} photos (Hybrid mode)...")
-        print("Starting...", flush=True)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_photo = {
-                executor.submit(self._process_single_photo_hybrid, photo_id, albums): photo_id
-                for photo_id, albums in photos_to_process
-            }
-
-            for future in concurrent.futures.as_completed(future_to_photo):
-                processed += 1
-                photo_id = future_to_photo[future]
-                try:
-                    result = future.result()
-                    if result:
-                        self.stats['successful']['count'] += 1
-                        status = f"Processing: {photo_id}"
-                    else:
-                        status = f"Skipped: {photo_id}"
-                except Exception as e:
-                    self.stats['failed']['count'] += 1
-                    self.stats['failed']['details'].append(
-                        (f"photo_{photo_id}", str(e))
-                    )
-                    status = f"Error: {photo_id}"
-                    logging.error(f"Error processing {photo_id}: {str(e)}")
-
-                # Update progress
-                print(f"\r{processed}/{total_photos} ({(processed/total_photos)*100:.1f}%) - {status}",
-                      end='', flush=True)
-
-        print()  # Final newline
-        print(f"Completed processing {processed} photos")
-        print(f"Successful: {self.stats['successful']['count']}")
-        print(f"Failed: {self.stats['failed']['count']}")
-
-    def _process_single_photo_hybrid(self, photo_id: str, albums: List[str]) -> bool:
-        """Process a single photo for hybrid organization (by date and album)"""
         try:
-            # Load photo metadata
-            photo_json = self._load_photo_metadata(photo_id)
-            if not photo_json and self.block_if_failure:
-                self.stats['failed']['metadata']['count'] += 1
-                self.stats['failed']['metadata']['details'].append(
-                    (f"photo_{photo_id}", "Metadata file not found", False)
-                )
-                return False
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.cpu_cores) as executor:
+                futures = []
 
-            # Find the source file
-            source_file = self._find_photo_file(photo_id, photo_json['name'] if photo_json else photo_id)
-            if not source_file:
-                self.stats['failed']['file_copy']['count'] += 1
-                self.stats['failed']['file_copy']['details'].append(
-                    (f"photo_{photo_id}", "Source file not found")
-                )
-                return False
+                # Submit all tasks
+                for photo_id, albums in self.photo_to_albums.items():
+                    if organization == 'by_date':
+                        future = executor.submit(self._process_single_photo_by_date, photo_id, date_format)
+                    else:
+                        future = executor.submit(self._process_single_photo_wrapper, (photo_id, albums))
+                    futures.append(future)
 
-            # Determine date for directory structure
-            if photo_json and 'date_taken' in photo_json:
-                date_taken = photo_json['date_taken']
-            else:
-                try:
-                    date_taken = datetime.fromtimestamp(source_file.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-                    logging.warning(f"Using file modification time for {photo_id} as date_taken is not available")
-                except Exception as e:
-                    date_taken = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    logging.warning(f"Using current date for {photo_id} as fallback")
-
-            # Create hybrid base path
-            date_path = self._get_date_path(date_taken, self.date_format)
-            base_date_dir = self.output_dir / "full_library_export" / "hybrid" / date_path
-
-            # Determine destination based on whether the photo is in albums
-            if albums:
-                for album_name in albums:
-                    album_dir = base_date_dir / self._sanitize_folder_name(album_name)
-                    album_dir.mkdir(parents=True, exist_ok=True)
-
-                    # Create destination path
-                    dest_file = album_dir / self._get_destination_filename(photo_id, source_file, photo_json)
-
-                    # Skip if file exists and we're resuming
-                    if self.resume and dest_file.exists():
-                        self.stats['skipped']['count'] += 1
-                        self.stats['skipped']['details'].append(
-                            (str(source_file), "File already exists (resume mode)")
-                        )
-                        continue
-
+                # Process completed tasks
+                for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
                     try:
-                        # Copy file
-                        shutil.copy2(source_file, dest_file)
+                        result = future.result()
+                        processed += 1
 
-                        # Process metadata if available
-                        if photo_json:
-                            media_type = self.get_media_type(dest_file)
-                            if media_type == MediaType.IMAGE:
-                                self._embed_image_metadata(dest_file, photo_json)
-                                if self.write_xmp_sidecars:
-                                    self._write_xmp_sidecar(dest_file, photo_json)
-                            elif media_type == MediaType.VIDEO:
-                                self._embed_video_metadata(dest_file, photo_json)
-                                if self.write_xmp_sidecars:
-                                    self._write_xmp_sidecar(dest_file, photo_json)
+                        # Update progress based on chunk size
+                        if processed % self.chunk_size == 0 or processed == total_photos:
+                            percentage = (processed / total_photos) * 100
+                            current_memory = psutil.Process().memory_info().rss / (1024*1024*1024)
+
+                            # Progress message
+                            progress_msg = (
+                                f"\rProgress: {processed}/{total_photos} ({percentage:.1f}%) - "
+                                f"Success: {self.stats['successful']['count']}, "
+                                f"Failed: {self.stats['failed']['count']} - "
+                                f"Memory: {current_memory:.1f}GB"
+                            )
+
+                            # Print to both console and GUI
+                            print(progress_msg, flush=True)
+                            logging.info(progress_msg)
+
+                            sys.stdout.flush()  # Ensure output is flushed
+
+                            # Periodic memory management
+                            if processed % 1000 == 0:
+                                gc.collect()
+                                check_memory()
+                                log_memory_usage()
 
                     except Exception as e:
-                        self.stats['failed']['file_copy']['count'] += 1
-                        self.stats['failed']['file_copy']['details'].append(
-                            (str(source_file), f"Error processing file: {str(e)}")
-                        )
-                        if self.block_if_failure:
-                            return False
-                        continue
+                        error_msg = f"Error processing photo: {str(e)}"
+                        print(error_msg)
+                        logging.error(error_msg)
+                        self.stats['failed']['count'] += 1
 
-            else:
-                # No albums - put directly in date folder
-                dest_file = base_date_dir / self._get_destination_filename(photo_id, source_file, photo_json)
-
-                # Skip if file exists and we're resuming
-                if self.resume and dest_file.exists():
-                    self.stats['skipped']['count'] += 1
-                    self.stats['skipped']['details'].append(
-                        (str(source_file), "File already exists (resume mode)")
-                    )
-                    return True
-
-                try:
-                    # Create parent directories if they don't exist
-                    base_date_dir.mkdir(parents=True, exist_ok=True)
-
-                    # Copy file
-                    shutil.copy2(source_file, dest_file)
-
-                    # Process metadata if available
-                    if photo_json:
-                        media_type = self.get_media_type(dest_file)
-                        if media_type == MediaType.IMAGE:
-                            self._embed_image_metadata(dest_file, photo_json)
-                            if self.write_xmp_sidecars:
-                                self._write_xmp_sidecar(dest_file, photo_json)
-                        elif media_type == MediaType.VIDEO:
-                            self._embed_video_metadata(dest_file, photo_json)
-                            if self.write_xmp_sidecars:
-                                self._write_xmp_sidecar(dest_file, photo_json)
-
-                except Exception as e:
-                    self.stats['failed']['file_copy']['count'] += 1
-                    self.stats['failed']['file_copy']['details'].append(
-                        (str(source_file), f"Error processing file: {str(e)}")
-                    )
-                    if self.block_if_failure:
-                        return False
-
-            self.stats['successful']['count'] += 1
-            self.stats['successful']['details'].append(
-                (str(source_file), str(dest_file),
-                 "Exported hybrid" + (" with metadata" if photo_json else " without metadata"))
-            )
-            return True
+                    # Show individual file progress
+                    if isinstance(result, tuple) and len(result) >= 3:
+                        _, _, filename = result[:3]
+                        file_msg = f"Processing {processed}/{total_photos} ({(processed/total_photos)*100:.1f}%) - {os.path.basename(filename)}"
+                        print(file_msg)
+                        logging.info(file_msg)
+                        sys.stdout.flush()
 
         except Exception as e:
-            error_msg = f"Error processing {photo_id}: {str(e)}"
+            error_msg = f"Error in photo processing: {str(e)}"
+            print(error_msg)
             logging.error(error_msg)
-            self.stats['failed']['count'] += 1
-            self.stats['failed']['details'].append(
-                (str(source_file) if 'source_file' in locals() else f"photo_{photo_id}",
-                 error_msg)
-            )
-            return False
+            raise
+
+        finally:
+            # Final cleanup and stats
+            gc.collect()
+            final_msg = [
+                "\nProcessing complete!",
+                f"Processed {processed}/{total_photos} photos",
+                f"Successful: {self.stats['successful']['count']}",
+                f"Failed: {self.stats['failed']['count']}",
+                f"Final memory usage: {psutil.Process().memory_info().rss / (1024*1024*1024):.1f}GB"
+            ]
+
+            # Print final statistics
+            for msg in final_msg:
+                print(msg)
+                logging.info(msg)
+
+            log_memory_usage()
 
     def _build_formatted_description(self, metadata: Dict) -> str:
         """Create a formatted description including key metadata fields based on configuration"""
@@ -2361,19 +2222,22 @@ class FlickrToImmich:
 
     def _process_single_photo_wrapper(self, item):
         """Wrapper function for thread pool"""
-        photo_id, albums = item
         try:
-            # First, find the source file to get the actual filename
+            photo_id, albums = item
             photo_json = self._load_photo_metadata(photo_id)
             source_file = self._find_photo_file(photo_id, photo_json['name'] if photo_json else photo_id)
 
-            # Process the photo
             success = self._process_single_photo_by_album(photo_id, albums)
 
-            # Return success status along with photo info
+            # Clear any large objects
+            del photo_json
+
             return (success, photo_id, str(source_file) if source_file else f"unknown_{photo_id}")
         except Exception as e:
             return (False, photo_id, f"unknown_{photo_id}", str(e))
+        finally:
+            # Cleanup
+            gc.collect()
 
     def _process_single_photo_by_album(self, photo_id: str, albums: List[str]) -> bool:
         """Process a single photo with album organization, including date subfolders for unorganized photos"""
@@ -3404,7 +3268,7 @@ def main():
     export_type.add_argument(
         '--organization',
         metavar='Organization Method',
-        choices=['by_album', 'by_date', 'hybrid'],
+        choices=['by_album', 'by_date'],
         default='by_date',
         help='How to organize photos in the library'
     )
@@ -3580,6 +3444,44 @@ def main():
         }
     )
 
+    advanced.add_argument(
+        '--max-memory',
+        metavar='Maximum Memory (GB)',
+        type=float,
+        default=4.0,
+        help='Maximum memory to use in GB (default: 4.0)',
+        gooey_options={
+            'label': 'Maximum Memory (GB)'
+        }
+    )
+
+    advanced.add_argument(
+        '--cpu-cores',
+        metavar='CPU Cores',
+        type=int,
+        default=min(os.cpu_count(), 4),  # Default to lesser of 4 or available cores
+        help=f'Number of CPU cores to use (default: {min(os.cpu_count(), 4)}, max: {os.cpu_count()})',
+        gooey_options={
+            'label': 'CPU Cores',
+            'min': 1,
+            'max': os.cpu_count()
+        }
+    )
+
+    advanced.add_argument(
+        '--chunk-size',
+        metavar='Progress Update Frequency',
+        type=int,
+        default=100,
+        help='Update progress display every N photos (lower = more frequent updates but possibly slower processing)',
+        gooey_options={
+            'label': 'Progress Update Frequency (photos)',
+            'min': 10,      # Don't allow updates too frequently
+            'max': 1000,    # Don't wait too long between updates
+            'help': 'How often to update the progress display. Lower values show more frequent updates but may slow processing slightly. Example: 100 = update every 100 photos'
+        }
+    )
+
     # Parse arguments
     args = parser.parse_args()
 
@@ -3661,7 +3563,16 @@ def main():
             block_if_failure=args.export_block_if_failure,
             resume=args.resume,
             use_api=args.use_api,
-            quiet=args.quiet
+            quiet=args.quiet,
+            fave_weight=args.fave_weight,
+            comment_weight=args.comment_weight,
+            view_weight=args.view_weight,
+            min_views=args.min_views,
+            min_faves=args.min_faves,
+            min_comments=args.min_comments,
+            max_memory=args.max_memory,
+            cpu_cores=args.cpu_cores,
+            chunk_size=args.chunk_size
         )
 
         # Process based on export mode
@@ -3679,32 +3590,20 @@ def main():
             logging.info("Step 2: Creating album structure...")
             if args.organization == 'by_album':
                 converter.create_album_structure()
-            elif args.organization == 'by_date':
+            else:  # by_date
                 converter.create_date_structure(args.date_format)
-            elif args.organization == 'hybrid':
-                converter.create_date_structure(args.date_format)
-                converter.create_album_structure()
 
             logging.info("Step 4: Processing photos...")
-            if args.organization == 'hybrid':
-                converter.process_photos_hybrid(args.date_format)
-            else:
-                converter.process_photos(args.organization, args.date_format)
+            converter.process_photos(args.organization, args.date_format)
 
         elif args.export_mode == 'Full library only':
             logging.info("Processing full library only...")
             if args.organization == 'by_album':
                 converter.create_album_structure()
-            elif args.organization == 'by_date':
+            else:  # by_date
                 converter.create_date_structure(args.date_format)
-            elif args.organization == 'hybrid':
-                converter.create_date_structure(args.date_format)
-                converter.create_album_structure()
 
-            if args.organization == 'hybrid':
-                converter.process_photos_hybrid(args.date_format)
-            else:
-                converter.process_photos(args.organization, args.date_format)
+            converter.process_photos(args.organization, args.date_format)
 
         elif args.export_mode == 'Highlights only':
             logging.info("Processing highlights only...")
