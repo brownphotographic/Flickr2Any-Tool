@@ -1051,6 +1051,10 @@ class FlickrToImmich:
             if not self.resume:
                 self._clear_output_directory()
 
+            # Create failed files directory
+            self.failed_dir = self.output_dir / "failed_files"
+            self.failed_dir.mkdir(parents=True, exist_ok=True)
+
             # Initialize data containers
             self.account_data = None
             self.user_mapping = {}
@@ -2249,28 +2253,33 @@ class FlickrToImmich:
                 working_dir = None  # Will be handled by _process_single_photo_by_album
 
             if not working_dir:
-                raise ValueError(f"No working directory provided for photo {photo_id}")
+                print(f"Error for photo {photo_id}: No working directory provided")
+                return self._handle_failed_file(photo_id, None, "No working directory")
 
             if not isinstance(working_dir, Path):
                 working_dir = Path(working_dir)
 
             # Load metadata first to determine if we should proceed
             photo_json = self._load_photo_metadata(photo_id)
-            if not photo_json and self.block_if_failure:
-                self.stats['failed']['metadata']['count'] += 1
-                self.stats['failed']['metadata']['details'].append(
-                    (f"photo_{photo_id}", "Metadata file not found", False)
-                )
-                return None, None
+            if not photo_json:
+                print(f"Error for photo {photo_id}: Could not load metadata")
+                if self.block_if_failure:
+                    self.stats['failed']['metadata']['count'] += 1
+                    self.stats['failed']['metadata']['details'].append(
+                        (f"photo_{photo_id}", "Metadata file not found", False)
+                    )
+                    return self._handle_failed_file(photo_id, None, "Metadata not found")
 
             # Find source file
             source_file = self._find_photo_file(photo_id, photo_json['name'] if photo_json else photo_id)
             if not source_file:
+                print(f"Error for photo {photo_id}: Source file not found")
                 self.stats['failed']['file_copy']['count'] += 1
                 self.stats['failed']['file_copy']['details'].append(
                     (f"photo_{photo_id}", "Source file not found")
                 )
-                return None, None
+                return self._handle_failed_file(photo_id, None, "Source file not found")
+
 
             # Process the photo through album-based processing
             result = self._process_single_photo_by_album(photo_id, albums, working_dir)
@@ -2281,30 +2290,76 @@ class FlickrToImmich:
                 if dest and dest.exists():
                     return source, dest
                 else:
+                    print(f"Error for photo {photo_id}: Destination file not created")
                     self.stats['failed']['file_copy']['count'] += 1
                     self.stats['failed']['file_copy']['details'].append(
-                        (str(source_file) if source_file else f"photo_{photo_id}",
-                        "Destination file not created")
+                        (str(source_file), "Destination file not created")
                     )
-                    return None, None
+                    return self._handle_failed_file(photo_id, source_file, "Failed to create destination")
             else:
-                return None, None
+                return self._handle_failed_file(photo_id, source_file, "Invalid processing result")
 
         except Exception as e:
-            error_msg = f"Error in photo wrapper for {photo_id if 'photo_id' in locals() else 'unknown'}: {str(e)}"
-            logging.error(error_msg)
-            self.stats['failed']['count'] += 1
-            self.stats['failed']['details'].append(
-                (str(source_file) if 'source_file' in locals() else "unknown",
-                error_msg)
-            )
-            return None, None
+            error_msg = f"Error processing photo {photo_id}: {str(e)}"
+            print(error_msg)
+            return self._handle_failed_file(photo_id, source_file if 'source_file' in locals() else None,
+                                        f"Exception: {str(e)}")
 
         finally:
             # Clean up any temporary resources if needed
             if hasattr(self, '_temp_data'):
                 self._temp_data.clear()
 
+    def _handle_failed_file(self, photo_id: str, source_file: Optional[Path], error_reason: str) -> Tuple[Optional[Path], Optional[Path]]:
+        """
+        Handle a failed file by copying it to the failed directory and logging the error
+        """
+        try:
+            # Increment failed counter
+            self.stats['failed']['count'] += 1
+
+            if source_file and source_file.exists():
+                # Create a subdirectory based on error reason
+                error_dir = self.failed_dir / self._sanitize_folder_name(error_reason)
+                error_dir.mkdir(parents=True, exist_ok=True)
+
+                # Create destination path
+                dest_file = error_dir / source_file.name
+
+                # Handle filename conflicts
+                counter = 1
+                while dest_file.exists():
+                    dest_file = error_dir / f"{source_file.stem}_{counter}{source_file.suffix}"
+                    counter += 1
+
+                # Copy the file
+                shutil.copy2(source_file, dest_file)
+
+                # Create an error info file
+                error_info_file = dest_file.with_suffix('.error.txt')
+                with open(error_info_file, 'w', encoding='utf-8') as f:
+                    f.write(f"Photo ID: {photo_id}\n")
+                    f.write(f"Original path: {source_file}\n")
+                    f.write(f"Error: {error_reason}\n")
+                    f.write(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+                print(f"Copied failed file to: {dest_file}")
+
+                # Add to failed details
+                self.stats['failed']['details'].append(
+                    (str(source_file), error_reason)
+                )
+
+                return source_file, dest_file
+
+        except Exception as e:
+            print(f"Error handling failed file {photo_id}: {str(e)}")
+            # Still increment failed counter even if handling fails
+            self.stats['failed']['details'].append(
+                (str(source_file) if source_file else photo_id, f"Failed to handle error: {str(e)}")
+            )
+
+        return None, None
     def _process_single_photo_by_album(self, photo_id: str, albums: List[str], working_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
         """Process a single photo with album organization"""
         try:
