@@ -3020,7 +3020,11 @@ def gui_main():
     """Entry point for GUI version"""
     try:
         if '--cli' in sys.argv:
+            logging.info("Running in CLI mode")
             sys.argv.remove('--cli')
+            # Call the main function directly without Gooey/wx
+            main()
+            return
 
         # Create wx.App instance before using wx
         app = wx.App(False)
