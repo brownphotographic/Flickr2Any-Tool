@@ -230,7 +230,7 @@ class FlickrPreprocessor:
     def _is_media_zip(self, filename: str) -> bool:
         """Check if a file is a media zip file"""
         import re
-        pattern = r'^data-download-\d+\.zip$'
+        pattern = r'^data_\d+_[a-f0-9]+_\d+\.zip$'
         return bool(re.match(pattern, filename))
 
     def _extract_zip(self, zip_path: Path, extract_path: Path, desc: str) -> tuple[int, list[str]]:
