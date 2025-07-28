@@ -39,46 +39,161 @@ Takes a Flickr library and reformats it to various options to allow importing to
 
 ### Prerequisites
 
-- Python 3.6 or higher
+- Git (for cloning the repository)
+- Python 3.10 or higher
 - System Dependencies:
   - ExifTool (must be in system PATH)
+  - pip (Python package installer)
+  - virtualenv (recommended)
+
+#### Installing Git
+
+##### Windows
+1. Download Git from [git-scm.com](https://git-scm.com/download/windows)
+2. Run the installer, accepting the default settings
+3. Open Command Prompt or PowerShell to verify installation:
+```bash
+git --version
+```
+
+##### macOS
+1. Install using Homebrew (recommended):
+```bash
+# First install Homebrew if you don't have it
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+# Then install Git
+brew install git
+```
+Or install Xcode Command Line Tools which includes Git:
+```bash
+xcode-select --install
+```
+
+##### Linux (Debian/Ubuntu)
+```bash
+sudo apt update
+sudo apt install git
+```
+
+##### Linux (Fedora)
+```bash
+sudo dnf install git
+```
+
+##### Linux (Arch)
+```bash
+sudo pacman -S git
+```
+
+#### Installing Python and pip
+
+##### Windows
+1. Download Python 3.10 or higher from [python.org](https://www.python.org/downloads/)
+2. During installation:
+   - Check "Add Python to PATH"
+   - Check "Install pip" (usually selected by default)
+3. Verify installations:
+```bash
+python --version
+pip --version
+```
+##### macOS
+1. Using Homebrew (recommended):
+```bash
+# Install Homebrew if you don't have it
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+# Install Python (includes pip)
+brew install python
+```
+2. Verify installations:
+```bash
+python3 --version
+pip3 --version
+```
+
+##### Linux (Debian/Ubuntu)
+```bash
+sudo apt update
+sudo apt install python3 python3-pip
+```
+
+##### Linux (Fedora)
+```bash
+sudo dnf install python3 python3-pip
+```
+
+##### Linux (Arch)
+```bash
+sudo pacman -S python python-pip
+```
+
+#### Upgrading pip (All Platforms)
+It's recommended to upgrade pip to the latest version:
+
+```bash
+# Windows
+python -m pip install --upgrade pip
+
+# macOS/Linux
+python3 -m pip install --upgrade pip
+```
+
+If you get a permissions error, try:
+```bash
+# Windows (run as administrator)
+python -m pip install --upgrade pip --user
+
+# macOS/Linux
+sudo python3 -m pip install --upgrade pip
+```
+
+#### Installing virtualenv
+virtualenv is recommended for creating isolated Python environments:
+
+```bash
+# Windows
+pip install virtualenv
+
+# macOS/Linux
+pip3 install virtualenv
+```
+
+#### Installing ExifTool
+ExifTool (must be in system PATH)
     - Ubuntu/Debian: `sudo apt-get install libimage-exiftool-perl`
     - MacOS: `brew install exiftool`
     - Windows: Download from [ExifTool website](https://exiftool.org) and add to PATH
 
 ### Installation Methods
 
-#### Option 1: Using pip (Recommended)
+### Local Installation
 
-Navigate to the project directory where you want to store the script, then open a terminal window and type:
-
+1. Clone the repository:
 ```bash
-pip install flickr-to-anytool
+git clone https://github.com/brownphotographic/Flickr2Any-Tool.git
+cd Flickr2Any-Tool
 ```
 
-#### Option 2: Installing from Source
-
-1. Clone or download the repository
-2. Navigate to the project directory
-3. Create virtual environment in your project directory (recommended)
+2. Create and activate a virtual environment (recommended):
 ```bash
 python -m venv .venv
-```
-Then you must activate the virtual environment:
-```bash
-source .venv/bin/activate
-```
-4. Install using pip:
-```bash
-pip install .
+source .venv/bin/activate  # On Linux/Mac
+# OR
+.venv\Scripts\activate     # On Windows
 ```
 
-For development installation (editable mode):
+3. Install the package locally in editable mode:
 ```bash
 pip install -e .
 ```
 
-This will automatically install all required dependencies defined in setup.py.
+4. Install required dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+The tool should now be available as `flickr-to-any` in your virtual environment.
+```
 
 ## Usage
 

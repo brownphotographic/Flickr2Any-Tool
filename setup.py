@@ -11,6 +11,7 @@ setup(
         'wxPython',
         'Gooey',
         'tomlkit'
+        'psutil',
     ],
     entry_points={
         'console_scripts': [  # Changed from gui_scripts to console_scripts
