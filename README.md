@@ -18,6 +18,15 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+---
+## Disclaimer
+
+> This script is provided as-is, **unsupported and unmaintained**. No warranty is given. No support is offered. You run this entirely at your own risk. The author accepts zero responsibility for data loss, system damage, corrupted configs, existential dread, or any other outcome resulting from use of this script.
+>
+> This is a hobby tool. Test it. Read what it does before you run it. Back up your data independently before doing anything irreversible.
+
+---
+
 ---------------------------
 ## Introduction
 
