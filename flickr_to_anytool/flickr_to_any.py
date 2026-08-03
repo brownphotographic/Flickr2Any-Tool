@@ -54,6 +54,12 @@ import time
 import psutil
 import gc
 import re
+import threading
+
+# Photos are copied from several worker threads at once. Choosing a destination
+# name and creating the file has to be atomic, or two photos that share a title
+# both see the name as free and one silently overwrites the other.
+_DEST_NAME_LOCK = threading.Lock()
 
 
 # Configure environment for progress bars and disable most logging
@@ -1864,9 +1870,13 @@ class FlickrToImmich:
             # Find ALL potential IDs in the filename, including those not following _o pattern
             import re
             # Updated pattern to catch more ID variations
+            # Flickr photo IDs are 8-11 digits: photos from around 2005 have 8,
+            # the late 2000s are mostly 9, and modern uploads are 10-11.
+            # The ID may also be at the very start of the filename, which happens
+            # when a photo has no title (e.g. 30410016513_b941ab820b_o.jpg).
             patterns = [
-                r'_(\d{10,11})(?:_o)?(?:\.|_)',  # Standard pattern
-                r'[^0-9](\d{10,11})[^0-9]',      # Any 10-11 digit number
+                r'(?:^|_)(\d{8,11})(?:_o)?(?:\.|_)',  # Standard pattern
+                r'(?:^|[^0-9])(\d{8,11})(?:[^0-9]|$)',  # Any 8-11 digit number
             ]
 
             all_matches = set()
@@ -2339,7 +2349,12 @@ class FlickrToImmich:
                         f.write(f"Error: {error_reason}\n")
                         f.write(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-                    return source_file, dest_file
+                    # Deliberately return None for the destination. The caller
+                    # decides success by testing whether the destination exists,
+                    # so returning the failed_files copy here made every failure
+                    # count as a success and reported "Failed: 0" for runs that
+                    # had failed.
+                    return source_file, None
 
                 except Exception as copy_error:
                     print(f"Error copying failed file: {str(copy_error)}")
@@ -2385,8 +2400,20 @@ class FlickrToImmich:
                     album_dir.mkdir(parents=True, exist_ok=True)
                     dest_file = album_dir / self._get_destination_filename(photo_id, source_file, photo_json)
 
-                    # Copy file
-                    shutil.copy2(source_file, dest_file)
+                    # Destination names come from the photo title, and two photos
+                    # can easily share one (camera defaults like IMG_0001 or
+                    # DSC_0042). Without this guard the second photo silently
+                    # overwrites the first and both are still counted as
+                    # successes. Appending the Flickr ID keeps them distinct and
+                    # is deterministic, so a re-run produces the same name.
+                    # The name check and the copy are held under one lock because
+                    # several photos are processed in parallel.
+                    with _DEST_NAME_LOCK:
+                        if dest_file.exists():
+                            dest_file = album_dir / f"{dest_file.stem}_{photo_id}{dest_file.suffix}"
+                            logging.warning(
+                                f"Filename collision for photo {photo_id}; using {dest_file.name}")
+                        shutil.copy2(source_file, dest_file)
 
                     # Only embed metadata for the first copy
                     if not processed_files:
@@ -2633,7 +2660,10 @@ class FlickrToImmich:
         except subprocess.CalledProcessError as e:
             error_msg = f"Error embedding metadata in {photo_file}: {e.stderr}"
             logging.error(error_msg)
-            self.stats['errors'].append(error_msg)
+            # self.stats has no 'errors' key, so appending here raised a KeyError
+            # that replaced the real exiftool error with "Album processing error:
+            # 'errors'" further up the stack.
+            self.stats.setdefault('errors', []).append(error_msg)
             raise
 
     def _embed_video_metadata(self, video_file: Path, metadata: Dict):
@@ -2718,8 +2748,8 @@ class FlickrToImmich:
                     <rdf:li xml:lang="x-default">{xml_escape(metadata.get("license", "All Rights Reserved"))}</rdf:li>
                 </rdf:Alt>
             </dc:rights>
-            <xmp:CreateDate>{xml_escape(metadata["date_taken"])}</xmp:CreateDate>
-            <xmp:ModifyDate>{xml_escape(metadata["date_taken"])}</xmp:ModifyDate>
+            <xmp:CreateDate>{xml_escape(metadata.get("date_taken", ""))}</xmp:CreateDate>
+            <xmp:ModifyDate>{xml_escape(metadata.get("date_taken", ""))}</xmp:ModifyDate>
 
             <!-- Photo-specific Flickr metadata -->
             <flickr:id>{xml_escape(metadata["id"])}</flickr:id>
@@ -2803,9 +2833,10 @@ class FlickrToImmich:
             '-ignoreMinorErrors',
             '-m',
 
-            # Core timestamp metadata
-            f'-DateTimeOriginal={metadata["date_taken"]}',
-            f'-CreateDate={metadata["date_taken"]}',
+            # Core timestamp metadata. Some exported photos have no date_taken,
+            # and indexing it raw raised a KeyError that aborted the whole photo.
+            f'-DateTimeOriginal={metadata.get("date_taken", "")}',
+            f'-CreateDate={metadata.get("date_taken", "")}',
 
             # Basic descriptive metadata
             f'-Title={metadata.get("name", "")}',
@@ -2904,6 +2935,12 @@ class FlickrToImmich:
                 args.extend([
                     f'-GPSLatitude={geo["latitude"]}',
                     f'-GPSLongitude={geo["longitude"]}',
+                    # Without the Ref tags exiftool stores only the magnitude and
+                    # drops the sign, so a Western/Southern location reads back as
+                    # the opposite hemisphere. Passing the signed value lets
+                    # exiftool derive the correct N/S/E/W itself.
+                    f'-GPSLatitudeRef={geo["latitude"]}',
+                    f'-GPSLongitudeRef={geo["longitude"]}',
                 ])
 
         # Add the media file at the end
